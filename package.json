@@ -1,0 +1,90 @@
+{
+  "name": "liteeditor-ai",
+  "version": "1.0.21-alpha",
+  "description": "Lightweight editor for working with AI coding agents in the terminal",
+  "main": "main.js",
+  "author": "Максим Кузьминский <i@m-letto.ru>",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/DanielLetto2020/LiteEditorAI",
+  "repository": { "type": "git", "url": "https://github.com/DanielLetto2020/LiteEditorAI.git" },
+  "scripts": {
+    "build": "node build.js",
+    "start": "node build.js && electron --no-sandbox .",
+    "watch": "node build.js --watch",
+    "rebuild": "electron-rebuild -f -w node-pty",
+    "postinstall": "electron-rebuild -f -w node-pty || echo 'node-pty rebuild skipped — run: npm run rebuild'",
+    "gen-icons": "node scripts/gen-icons.js",
+    "install-desktop": "node scripts/install-desktop.js",
+    "dist:linux": "node build.js && electron-builder --linux deb",
+    "dist:win": "node build.js && electron-builder --win zip",
+    "release": "node scripts/release.js"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.7.1",
+    "@codemirror/lang-css": "^6.3.0",
+    "@codemirror/lang-html": "^6.4.9",
+    "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/lang-json": "^6.0.1",
+    "@codemirror/lang-markdown": "^6.3.1",
+    "@codemirror/lang-python": "^6.1.6",
+    "@codemirror/language": "^6.10.6",
+    "@codemirror/search": "^6.7.0",
+    "@codemirror/state": "^6.5.0",
+    "@codemirror/theme-one-dark": "^6.1.2",
+    "@codemirror/view": "^6.35.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^5.5.0",
+    "marked": "^18.0.4",
+    "node-pty": "^1.0.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.1",
+    "electron": "^33.2.0",
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.24.0",
+    "sharp": "^0.33.5"
+  },
+  "build": {
+    "appId": "com.mletto.liteeditorai",
+    "productName": "LiteEditorAI",
+    "directories": {
+      "output": "dist-release",
+      "buildResources": "assets"
+    },
+    "npmRebuild": false,
+    "asarUnpack": [
+      "**/node_modules/node-pty/**"
+    ],
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "renderer/index.html",
+      "renderer/styles.css",
+      "renderer/dist/**",
+      "assets/icon.png",
+      "assets/icon.svg",
+      "!**/*.pdb"
+    ],
+    "linux": {
+      "target": [
+        "deb"
+      ],
+      "category": "Development",
+      "icon": "assets/icon.png",
+      "maintainer": "Максим Кузьминский <i@m-letto.ru>",
+      "executableArgs": [
+        "--no-sandbox"
+      ]
+    },
+    "win": {
+      "target": [
+        "zip"
+      ],
+      "icon": "assets/icon.png",
+      "signAndEditExecutable": false
+    }
+  }
+}
