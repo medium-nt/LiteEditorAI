@@ -13,9 +13,12 @@ app.setName('LiteEditorAI');
 // Chromium SUID sandbox aborts at launch. We load only our own local content,
 // and the renderer already gets a shell via PTY, so the sandbox adds nothing.
 app.commandLine.appendSwitch('no-sandbox');
-// GPU accel is pointless for a terminal/text app and often unavailable on
-// VM/nested/VNC displays (silent launch crash). Software render = opens everywhere.
-app.disableHardwareAcceleration();
+// GPU accel powers the xterm WebGL renderer (smooth scroll) and is fine on real
+// desktops. It only breaks on VM/nested/VNC displays — there set LITE_NO_GPU=1 to
+// fall back to software rendering (xterm then uses the Canvas renderer).
+if (process.env.LITE_NO_GPU === '1' || process.env.LITE_SOFTWARE_RENDER === '1') {
+  app.disableHardwareAcceleration();
+}
 
 let mainWindow = null;
 let tray = null;
@@ -87,7 +90,7 @@ try {
   const legacy = path.join(os.homedir(), '.LiteEditor');
   if (!fs.existsSync(storeDir) && fs.existsSync(legacy)) fs.cpSync(legacy, storeDir, { recursive: true });
 } catch (_) {}
-const STORE_KEYS = ['projects', 'settings', 'layout', 'recents', 'lastParent', 'projFiles', 'categories', 'accordions', 'dismissed'];
+const STORE_KEYS = ['projects', 'settings', 'layout', 'recents', 'lastParent', 'projFiles', 'categories', 'sectionOrder', 'accordions', 'dismissed'];
 function ensureStoreDir() { try { fs.mkdirSync(storeDir, { recursive: true }); } catch (_) {} }
 function storeFile(key) { return path.join(storeDir, String(key).replace(/[^\w.-]/g, '_') + '.json'); }
 function readStoreKey(key) { try { return JSON.parse(fs.readFileSync(storeFile(key), 'utf8')); } catch { return undefined; } }
@@ -97,6 +100,14 @@ ensureStoreDir();
 ipcMain.on('store:loadAll', (e) => {
   const o = {};
   for (const k of STORE_KEYS) { const v = readStoreKey(k); if (v !== undefined) o[k] = v; }
+  o.noteCounts = {}; // project id -> number of notes, for card badges
+  try {
+    const nd = path.join(storeDir, 'notes');
+    for (const f of fs.readdirSync(nd)) {
+      if (!f.endsWith('.json')) continue;
+      try { const a = JSON.parse(fs.readFileSync(path.join(nd, f), 'utf8')); if (Array.isArray(a) && a.length) o.noteCounts[f.slice(0, -5)] = a.length; } catch (_) {}
+    }
+  } catch (_) {}
   e.returnValue = o; // synchronous: renderer loads the snapshot once at startup
 });
 ipcMain.on('store:set', (_e, { key, value }) => { if (STORE_KEYS.includes(key)) writeStoreKey(key, value); });
@@ -486,6 +497,17 @@ ipcMain.handle('git:checkout', async (_e, { root, branch }) => gitRun(root, ['ch
 ipcMain.handle('git:createBranch', async (_e, { root, branch }) => gitRun(root, ['checkout', '-b', branch]));
 ipcMain.handle('git:fetch', async (_e, root) => gitRun(root, ['fetch', '--all', '--prune']));
 ipcMain.handle('git:discardFile', async (_e, { root, file }) => gitRun(root, ['checkout', '--', file]));
+// Update a branch from its upstream WITHOUT checkout (fast-forward of the local ref).
+// Current branch can't be ff-fetched into → use pull --ff-only instead.
+ipcMain.handle('git:branchUpdate', async (_e, { root, branch, current }) => {
+  if (current) return gitRun(root, ['pull', '--ff-only']);
+  const remote = ((await git(root, ['config', `branch.${branch}.remote`])) || '').trim() || 'origin';
+  const rb = ((await git(root, ['config', `branch.${branch}.merge`])) || '').trim().replace('refs/heads/', '') || branch;
+  return gitRun(root, ['fetch', remote, `${rb}:${branch}`]);
+});
+// New branch from any base branch; optionally check it out.
+ipcMain.handle('git:branchCreate', async (_e, { root, name, base, checkout }) =>
+  gitRun(root, checkout ? ['checkout', '-b', name, base] : ['branch', name, base]));
 ipcMain.handle('git:init', async (_e, root) => gitRun(root, ['init']));
 ipcMain.handle('git:commit', async (_e, { root, message, push }) => {
   const add = await gitRun(root, ['add', '-A']); if (!add.ok) return add;

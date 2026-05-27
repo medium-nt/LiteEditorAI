@@ -5,6 +5,8 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { WebglAddon } from '@xterm/addon-webgl';
+import { CanvasAddon } from '@xterm/addon-canvas';
 import '@xterm/xterm/css/xterm.css';
 
 import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection } from '@codemirror/view';
@@ -21,7 +23,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { html } from '@codemirror/lang-html';
 import { css } from '@codemirror/lang-css';
 
-const APP_VERSION = 'alpha v1.0.21';
+const APP_VERSION = 'alpha v1.0.27';
 const GUTTER = 5;
 
 const lite = window.lite;
@@ -72,6 +74,7 @@ const missing = new Set();   // ids of projects whose folder no longer exists on
 const projFiles = loadProjFiles(); // id -> last file opened in the viewer
 const expandedDirs = new Set(); // tree dir paths currently expanded (survives live refresh)
 let gitFiles = {};           // active project: abs path -> git short status code
+let noteCounts = STORE.noteCounts || {}; // project id -> number of notes (card badge)
 let viewerOpen = false;
 let currentFile = null;
 let dirty = false;
@@ -133,26 +136,59 @@ function saveProjFiles() { persist('projFiles', Object.fromEntries(projFiles)); 
 
 // ---------------------------------------------------------------- projects column
 const UNCATEGORIZED = 'Все';
+const FAV_KEY = '__fav';
 function loadCategories() { return Array.isArray(STORE.categories) ? STORE.categories : []; }
 function saveCategories(c) { persist('categories', c); }
 function isCollapsed(key) { return !!(STORE.accordions || {})[key]; }
 function setCollapsed(key, v) { persist('accordions', { ...(STORE.accordions || {}), [key]: v }); }
+function loadSectionOrder() { return Array.isArray(STORE.sectionOrder) ? STORE.sectionOrder.slice() : null; }
+function saveSectionOrder(o) { persist('sectionOrder', o); }
+
+// Section display order. Default = "избранное / <категории> / все"; persisted once
+// reordered. effectiveOrder() reconciles the stored order with the keys that exist
+// now: drops gone categories, and slots new ones in just before «Все».
+function effectiveOrder() {
+  const keys = [FAV_KEY, ...loadCategories(), UNCATEGORIZED];
+  const stored = loadSectionOrder();
+  if (!stored) return keys;
+  const order = stored.filter((k) => keys.includes(k));
+  for (const k of keys) {
+    if (order.includes(k)) continue;
+    if (k === UNCATEGORIZED) { order.push(k); continue; }
+    const at = order.indexOf(UNCATEGORIZED);
+    if (at >= 0) order.splice(at, 0, k); else order.push(k);
+  }
+  return order;
+}
+// Sections that actually render now, in display order (★ Избранное only when non-empty).
+function buildSections() {
+  const cats = loadCategories();
+  const favs = projects.filter((p) => p.favorite);
+  return effectiveOrder().map((key) => {
+    if (key === FAV_KEY) return favs.length ? { key, label: '★ Избранное', list: favs, pinned: true } : null;
+    if (key === UNCATEGORIZED) return { key, label: UNCATEGORIZED, pinned: false, list: projects.filter((p) => !p.favorite && !cats.includes(p.category)) };
+    return { key, label: key, pinned: false, list: projects.filter((p) => !p.favorite && p.category === key) };
+  }).filter(Boolean);
+}
+function moveSection(key, dir) {
+  const visible = buildSections().map((s) => s.key);
+  const target = visible[visible.indexOf(key) + dir];
+  if (target === undefined) return;
+  const order = effectiveOrder();
+  const a = order.indexOf(key), b = order.indexOf(target);
+  [order[a], order[b]] = [order[b], order[a]];
+  saveSectionOrder(order); renderProjects();
+}
 
 function renderProjects() {
   const box = $('#projects');
   box.innerHTML = '';
-  const cats = loadCategories();
-  const favs = projects.filter((p) => p.favorite);
-  if (favs.length) box.appendChild(renderSection('★ Избранное', '__fav', favs, true));
-  const inAll = projects.filter((p) => !p.favorite && !cats.includes(p.category));
-  box.appendChild(renderSection(UNCATEGORIZED, UNCATEGORIZED, inAll, false));
-  for (const c of cats) {
-    const list = projects.filter((p) => !p.favorite && p.category === c);
-    box.appendChild(renderSection(c, c, list, false));
-  }
+  const sections = buildSections();
+  sections.forEach((s, i) => box.appendChild(renderSection(s, i, sections.length)));
   renderMiniRail();
 }
-function renderSection(label, key, list, pinned) {
+function renderSection(s, index, total) {
+  const { label, key, list, pinned } = s;
   const sec = el('div', 'pgroup' + (pinned ? ' pinned' : ''));
   const collapsed = isCollapsed(key);
   const head = el('div', 'pgroup-head');
@@ -160,13 +196,20 @@ function renderSection(label, key, list, pinned) {
   head.appendChild(chev);
   head.appendChild(el('span', 'pgroup-name', label));
   head.appendChild(el('span', 'pgroup-count', String(list.length)));
+  const tools = el('div', 'pgroup-tools');
+  const up = el('button', 'pgroup-arrow', '▲'); up.title = 'Выше'; up.disabled = index === 0;
+  const down = el('button', 'pgroup-arrow', '▼'); down.title = 'Ниже'; down.disabled = index === total - 1;
+  up.addEventListener('click', (e) => { e.stopPropagation(); moveSection(key, -1); });
+  down.addEventListener('click', (e) => { e.stopPropagation(); moveSection(key, +1); });
+  tools.appendChild(up); tools.appendChild(down);
+  head.appendChild(tools);
   const body = el('div', 'pgroup-body');
   if (collapsed) body.style.display = 'none';
   head.addEventListener('click', () => {
     const now = !isCollapsed(key); setCollapsed(key, now);
     body.style.display = now ? 'none' : 'block'; chev.textContent = now ? '▸' : '▾';
   });
-  if (key !== '__fav' && key !== UNCATEGORIZED) // custom categories can be renamed/deleted
+  if (key !== FAV_KEY && key !== UNCATEGORIZED) // custom categories can be renamed/deleted
     head.addEventListener('contextmenu', (e) => { e.preventDefault(); showCategoryMenu(e.clientX, e.clientY, key); });
   for (const p of list) body.appendChild(makeCard(p));
   sec.appendChild(head); sec.appendChild(body);
@@ -204,7 +247,8 @@ function makeCard(p) {
     if (activeId === p.id && viewerOpen) setViewerOpen(false);
     else { setActive(p.id); setViewerOpen(true); }
   });
-  const notesBtn = el('button', null, '📝 заметки');
+  const nc = noteCounts[p.id] || 0;
+  const notesBtn = el('button', null, nc ? `заметки · ${nc}` : 'заметки');
   notesBtn.addEventListener('click', (e) => { e.stopPropagation(); showNotes(p); });
   actions.appendChild(openViewer); actions.appendChild(notesBtn);
   card.appendChild(actions);
@@ -288,6 +332,8 @@ function renameCategory(old) {
   showPrompt('Переименовать категорию', 'Название', old, (name) => {
     if (name === old || name === UNCATEGORIZED) return;
     saveCategories([...new Set(loadCategories().map((c) => (c === old ? name : c)))]);
+    const order = loadSectionOrder();
+    if (order) saveSectionOrder(order.map((k) => (k === old ? name : k)));
     for (const p of projects) if (p.category === old) p.category = name;
     saveProjects(); renderProjects();
   });
@@ -407,7 +453,7 @@ async function showNotes(p) {
   m.classList.add('notes-modal');
   m.querySelector('.nm-proj').textContent = p.name;
   const list = m.querySelector('#nm-list');
-  const save = () => lite.store.notesSet(p.id, notes);
+  const save = () => { lite.store.notesSet(p.id, notes); noteCounts[p.id] = notes.length; renderProjects(); };
   let dragFrom = null;
 
   function editNote(row, note) {
@@ -481,6 +527,45 @@ function gitCodeClass(code) {
   if (code.includes('D')) return 'g-del';
   return 'g-mod';
 }
+// Branch manager (JetBrains-style): per branch — checkout · update WITHOUT switching · new branch from it.
+async function showBranches(body, p, back) {
+  const info = await lite.git.info(p.path);
+  body.innerHTML = '';
+  const head = el('div', 'gm-branch');
+  head.appendChild(el('span', 'gm-branchname', 'Ветки'));
+  head.appendChild(el('span', 'gm-track', 'текущая: ' + info.branch));
+  body.appendChild(head);
+
+  const list = el('div', 'gm-branches');
+  for (const b of (info.branches || [])) {
+    const cur = b === info.branch;
+    const row = el('div', 'gm-brow');
+    row.appendChild(el('span', 'gm-brname' + (cur ? ' cur' : ''), (cur ? '• ' : '') + b));
+    const acts = el('div', 'gm-bacts');
+    if (!cur) {
+      const co = el('button', 'gm-mini', '⤳'); co.title = 'Переключиться';
+      co.onclick = async () => { const r = await lite.git.checkout(p.path, b); toast(r.ok ? 'Ветка: ' + b : (r.error || 'не вышло'), { kind: r.ok ? undefined : 'err', ttl: 7000 }); renderProjects(); showBranches(body, p, back); };
+      acts.appendChild(co);
+    }
+    const up = el('button', 'gm-mini', '↻'); up.title = cur ? 'Обновить (pull --ff-only)' : 'Обновить из удалёнки БЕЗ переключения';
+    up.onclick = async () => { const r = await lite.git.branchUpdate(p.path, b, cur); toast(r.ok ? ('Обновлено: ' + b) : (r.error || 'не fast-forward / нет upstream'), { kind: r.ok ? undefined : 'err', ttl: 8000 }); showBranches(body, p, back); };
+    acts.appendChild(up);
+    const nb = el('button', 'gm-mini', '＋'); nb.title = 'Новая ветка от «' + b + '»';
+    nb.onclick = () => showPrompt('Новая ветка от «' + b + '»', 'Имя ветки (создастся и перейдём на неё)', '', async (name) => {
+      const r = await lite.git.branchCreate(p.path, name, b, true);
+      if (r.ok) { toast('Создана и перешёл: ' + name); renderProjects(); back(); } return r;
+    });
+    acts.appendChild(nb);
+    row.appendChild(acts);
+    list.appendChild(row);
+  }
+  body.appendChild(list);
+
+  const footer = el('div', 'gm-actions');
+  const b1 = el('button', 'btn', '‹ Назад к git'); b1.onclick = back;
+  footer.appendChild(b1);
+  body.appendChild(footer);
+}
 async function showGit(p) {
   const { m, close } = makeModal(`<h2>⎇ Git — <span class="gm-proj"></span></h2><div id="gm-body" class="gm-body">Загрузка…</div>`);
   m.classList.add('git-modal');
@@ -512,12 +597,9 @@ async function showGit(p) {
       refresh(); renderProjects();
     };
     head.appendChild(sel);
-    const newBr = el('button', 'gm-mini', '＋'); newBr.title = 'Новая ветка';
-    newBr.onclick = () => showPrompt('Новая ветка', 'Имя ветки', '', async (name) => {
-      const r = await lite.git.createBranch(p.path, name);
-      if (r.ok) { refresh(); renderProjects(); } return r;
-    });
-    head.appendChild(newBr);
+    const mgr = el('button', 'gm-mini', '⎇'); mgr.title = 'Ветки: переключить · обновить без перехода · новая от ветки';
+    mgr.onclick = () => showBranches(body, p, refresh);
+    head.appendChild(mgr);
     if (info.upstream && (info.ahead || info.behind)) head.appendChild(el('span', 'gm-track', `↑${info.ahead} ↓${info.behind}`));
     body.appendChild(head);
 
@@ -773,6 +855,34 @@ async function openFromTerminal(projPath, raw) {
   await openFile(p, line);
 }
 
+// True only for a real GPU — software WebGL (SwiftShader/llvmpipe) is slower than
+// Canvas and stalls, so route those to the Canvas renderer instead.
+function isHardwareWebgl() {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2') || document.createElement('canvas').getContext('webgl');
+    if (!gl) return false;
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const r = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '';
+    return !/swiftshader|llvmpipe|software|mesa offscreen/i.test(r);
+  } catch (_) { return false; }
+}
+// Fast xterm renderer: WebGL on real GPU (smooth scroll), else Canvas. Both beat
+// the default DOM renderer. On WebGL context loss → fall back to Canvas.
+function loadFastRenderer(term) {
+  if (isHardwareWebgl()) {
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        try { webgl.dispose(); } catch (_) {}
+        try { term.loadAddon(new CanvasAddon()); } catch (_) {}
+      });
+      term.loadAddon(webgl);
+      return;
+    } catch (_) {}
+  }
+  try { term.loadAddon(new CanvasAddon()); } catch (_) {}
+}
+
 function ensureTerminal(proj) {
   if (terms.has(proj.id)) return terms.get(proj.id);
   const container = el('div', 'term-instance');
@@ -787,6 +897,7 @@ function ensureTerminal(proj) {
   term.loadAddon(search);
   term.loadAddon(new WebLinksAddon((_e, uri) => lite.openExternal(uri)));
   term.open(container);
+  loadFastRenderer(term); // GPU/Canvas renderer → плавный скролл вместо тормозного DOM-рендера
   fit.fit();
   term.registerLinkProvider(fileLinkProvider(term, proj.path)); // src/app.js:42 → viewer
   lite.pty.create({ id: proj.id, cwd: proj.path, cols: term.cols, rows: term.rows });
@@ -827,13 +938,13 @@ async function pasteInto(id) {
 function showActiveTerminal() {
   $('#empty-hint').style.display = activeId ? 'none' : 'flex';
   for (const [id, rec] of terms) rec.container.style.display = id === activeId ? 'block' : 'none';
-  refitActiveTerminal();
+  refitActiveTerminal(true);
 }
-function refitActiveTerminal() {
+function refitActiveTerminal(focusIt) {
   const rec = terms.get(activeId);
   if (!rec) return;
   requestAnimationFrame(() => {
-    try { rec.fit.fit(); lite.pty.resize(activeId, rec.term.cols, rec.term.rows); rec.term.focus(); } catch (_) {}
+    try { rec.fit.fit(); lite.pty.resize(activeId, rec.term.cols, rec.term.rows); if (focusIt) rec.term.focus(); } catch (_) {}
   });
 }
 function clearTerminal(id) { const rec = terms.get(id || activeId); if (rec) { try { rec.term.clear(); } catch (_) {} rec.term.focus(); } }
@@ -1783,7 +1894,8 @@ function init() {
     if (p) openByPath(p, baseName(p));
   });
 
-  new ResizeObserver(() => refitActiveTerminal()).observe($('#terminal-pane'));
+  let rezTimer;
+  new ResizeObserver(() => { clearTimeout(rezTimer); rezTimer = setTimeout(() => refitActiveTerminal(), 80); }).observe($('#terminal-pane'));
 
   applyFontSize();
   projects = loadProjectsFromDisk();
