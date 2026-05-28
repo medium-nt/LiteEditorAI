@@ -23,7 +23,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { html } from '@codemirror/lang-html';
 import { css } from '@codemirror/lang-css';
 
-const APP_VERSION = 'alpha v1.0.36';
+const APP_VERSION = 'alpha v1.0.47';
 const GUTTER = 5;
 const SCRATCH_ID = '__scratch__'; // системный терминал (домашняя папка), не привязан к проектам
 
@@ -39,6 +39,64 @@ function svgEl(html) {
   const t = document.createElement('template');
   t.innerHTML = html.trim();
   return t.content.firstChild;
+}
+// ---------------------------------------------------------------- icon set
+// One consistent line-icon family (Lucide-ish): 24-grid, currentColor stroke, rounded.
+// Inner markup only; icon() wraps it. Fill-based glyphs set their own fill/stroke.
+const ICONS = {
+  star: '<path d="M12 3.2l2.6 5.27 5.82.85-4.21 4.1.99 5.79L12 16.48 6.8 19.21l.99-5.79-4.21-4.1 5.82-.85z"/>',
+  'dots-v': '<circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/>',
+  'chevron-right': '<path d="M9 5l7 7-7 7"/>',
+  'chevron-down': '<path d="M5 9l7 7 7-7"/>',
+  'chevron-up': '<path d="M5 15l7-7 7 7"/>',
+  'chevron-left': '<path d="M15 5l-7 7 7 7"/>',
+  pencil: '<path d="M4 20h4L18.5 9.5a2 2 0 0 0-2.83-2.83L5 17v3z"/><path d="M13.5 6.5l4 4"/>',
+  eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
+  note: '<path d="M5.5 3.5h8L19 9v10.5a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1z"/><path d="M13 3.5V9h5.5"/><path d="M8 13h7M8 16.5h4.5"/>',
+  git: '<circle cx="6.5" cy="6" r="2.3"/><circle cx="6.5" cy="18" r="2.3"/><circle cx="17.5" cy="9" r="2.3"/><path d="M6.5 8.3v7.4M17.5 11.3c0 3.2-3.3 3.9-6.4 3.9"/>',
+  folder: '<path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2H18.5a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2z"/>',
+  palette: '<path d="M12 3a9 9 0 1 0 0 18c1.2 0 2-.9 2-2 0-.6-.3-1-.6-1.4-.3-.4-.6-.8-.6-1.3 0-.9.7-1.6 1.6-1.6H16a5 5 0 0 0 5-5c0-3.6-3.6-6.7-9-6.7z"/><circle cx="7.5" cy="11" r="1" fill="currentColor" stroke="none"/><circle cx="11" cy="7.5" r="1" fill="currentColor" stroke="none"/><circle cx="15.5" cy="8.5" r="1" fill="currentColor" stroke="none"/>',
+  'arrow-right': '<path d="M4 12h15M13 6l6 6-6 6"/>',
+  archive: '<rect x="3.5" y="4.5" width="17" height="4" rx="1"/><path d="M5 8.5v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-10M10 12h4"/>',
+  x: '<path d="M6 6l12 12M18 6L6 18"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  refresh: '<path d="M20 11.5a8 8 0 1 0-2.1 6.1"/><path d="M20 4.5v6h-6"/>',
+  save: '<path d="M5.5 4.5h10L20 9v10.5a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1v-14a1 1 0 0 1 1-1z"/><path d="M8 4.5v4.5h7M8 20v-5.5h8V20"/>',
+  diff: '<path d="M12 4.5v7M8.5 8h7M6 19h12"/>',
+  maximize: '<path d="M4 9V5.5a1 1 0 0 1 1-1H9M20 9V5.5a1 1 0 0 0-1-1H15M4 15v3.5a1 1 0 0 0 1 1H9M20 15v3.5a1 1 0 0 1-1 1H15"/>',
+  terminal: '<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 10l3 2.5-3 2.5M13 15h4"/>',
+  columns: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M13 4.5v15"/>',
+  eraser: '<path d="M15.5 5l3.5 3.5a1.8 1.8 0 0 1 0 2.6L12 18.5H7l-2.5-2.5a1.8 1.8 0 0 1 0-2.6l8.4-8.4a1.8 1.8 0 0 1 2.6 0z"/><path d="M8.5 11.5l4 4M5 20.5h14"/>',
+  trash: '<path d="M4.5 7h15M9.5 7V4.8a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7M6.5 7l.8 12.2a1 1 0 0 0 1 .95h7.4a1 1 0 0 0 1-.95L18.5 7"/>',
+  search: '<circle cx="11" cy="11" r="6.3"/><path d="M20 20l-3.8-3.8"/>',
+  check: '<path d="M5 12.5l4.2 4.2L19 7"/>',
+  download: '<path d="M12 4v10.5M8 11l4 4 4-4M5 19.5h14"/>',
+  upload: '<path d="M12 20V9.5M8 13l4-4 4 4M5 4.5h14"/>',
+  sliders: '<path d="M4 8h9M17 8h3M4 16h3M11 16h9"/><circle cx="15" cy="8" r="2.1"/><circle cx="9" cy="16" r="2.1"/>',
+  grid: '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5a2 2 0 0 1 2-2H16"/>',
+  play: '<path d="M7 5l12 7-12 7z" fill="currentColor" stroke="none"/>',
+  warning: '<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/>',
+  file: '<path d="M6 3.5h7L18.5 9v10.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1z"/><path d="M12.5 3.5V9H18"/>',
+  globe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.6 2.4 2.6 14.6 0 17M12 3.5c-2.6 2.4-2.6 14.6 0 17"/>',
+  clipboard: '<rect x="6" y="4.5" width="12" height="16" rx="2"/><rect x="9" y="3" width="6" height="3.4" rx="1"/>',
+};
+function icon(name, size = 16) {
+  return svgEl(`<svg class="ic" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`);
+}
+// Button carrying a single icon (replaces the old emoji-in-textContent buttons).
+function iconBtn(cls, name, title, size) {
+  const b = el('button', cls);
+  b.appendChild(icon(name, size));
+  if (title) b.title = title;
+  return b;
+}
+// Fill the static [data-icon] buttons defined in index.html (titlebar / pane toolbars).
+function hydrateIcons(root = document) {
+  root.querySelectorAll('[data-icon]').forEach((node) => {
+    if (node.querySelector('svg.ic')) return; // already done
+    node.appendChild(icon(node.dataset.icon, +node.dataset.iconSize || 16));
+  });
 }
 // basename that survives both POSIX and Windows separators (for the Windows build).
 function baseName(p) { return String(p).split(/[\\/]/).filter(Boolean).pop() || String(p); }
@@ -61,7 +119,7 @@ function persist(key, value) { STORE[key] = value; lite.store.set(key, value); }
 function projId(p) { let h = 5381; for (let i = 0; i < p.length; i++) h = ((h << 5) + h + p.charCodeAt(i)) >>> 0; return 'p' + h.toString(36); }
 
 // ---------------------------------------------------------------- settings (tiny on purpose)
-const DEFAULT_SETTINGS = { notifications: true, sound: false, idleMs: 1200, fontSize: 13, workingDir: '', scanDirs: [], theme: 'emerald', onboarded: false };
+const DEFAULT_SETTINGS = { notifications: true, sound: false, idleMs: 1200, fontSize: 13, workingDir: '', scanDirs: [], theme: 'neumorphism', onboarded: false };
 function loadSettings() { return { ...DEFAULT_SETTINGS, ...(STORE.settings || {}) }; }
 let settings = loadSettings();
 function saveSettings() { persist('settings', settings); }
@@ -69,12 +127,124 @@ function saveSettings() { persist('settings', settings); }
 // ---------------------------------------------------------------- state
 let projects = [];
 let activeId = null;
-const terms = new Map();
-const projState = new Map(); // id -> 'quiet' | 'busy' | 'waiting'
+const terms = new Map();          // sessionId -> { term, fit, search, container, projId, name, ... }
+const tabsByProj = new Map();     // projId -> { sessions: [sessionId...], active: sessionId }
+let sessionSeq = 0;
+const projState = new Map(); // sessionId -> 'quiet' | 'busy' | 'waiting'
 const missing = new Set();   // ids of projects whose folder no longer exists on disk
 const expandedDirs = new Set(); // tree dir paths currently expanded (survives live refresh)
 let gitFiles = {};           // active project: abs path -> git short status code
 let noteCounts = STORE.noteCounts || {}; // project id -> number of notes (card badge)
+
+// ---------------------------------------------------------------- notes auto-queue
+// Per-project queue that fires notes one-by-one: dispatch a note (text + Enter, so it
+// actually submits — unlike the manual «В терминал»), then wait for the agent to finish
+// its turn. The advance trigger is busy→waiting (янтарный): the agent is alive and back
+// to waiting on your input. Runtime-only — survives the modal closing, not an app restart.
+const queues = new Map(); // id -> { id, items:[{noteId,text}], running, pos, awaitingBusy, armed, onChange }
+function getQueue(id) {
+  let q = queues.get(id);
+  if (!q) { q = { id, items: [], running: false, pos: -1, awaitingBusy: false, armed: false, onChange: null }; queues.set(id, q); }
+  return q;
+}
+function queueBadgeText(q) {
+  if (!q || !q.items.length) return '';
+  if (!q.running) return `☰ ${q.items.length}`;
+  return q.armed ? '▶ ждёт' : `▶ ${Math.min(q.pos + 1, q.items.length)}/${q.items.length}`;
+}
+function updateQueueBadge(id) {
+  const q = queues.get(id);
+  const txt = queueBadgeText(q);
+  document.querySelectorAll(`.card-qbadge[data-id="${id}"]`).forEach((b) => {
+    b.textContent = txt;
+    b.classList.toggle('show', !!txt);
+    b.classList.toggle('running', !!(q && q.running));
+    b.classList.toggle('armed', !!(q && q.armed));
+  });
+}
+// Notify any open modal + refresh the card badge after a queue state change.
+function queueChanged(q) { try { q.onChange && q.onChange(); } catch (_) {} updateQueueBadge(q.id); }
+
+function queueDispatchNext(id) {
+  const q = queues.get(id);
+  if (!q || !q.running) return;
+  q.armed = false;
+  q.pos += 1;
+  if (q.pos >= q.items.length) { // reached the end → done
+    q.running = false; q.pos = q.items.length; q.awaitingBusy = false;
+    queueChanged(q);
+    const p = projects.find((x) => x.id === id);
+    toast(`✓ Очередь выполнена${p ? ' — ' + p.name : ''}`);
+    return;
+  }
+  const proj = projects.find((x) => x.id === id);
+  if (!proj) { q.running = false; queueChanged(q); return; }
+  ensureProjectTabs(proj);
+  const sid = (tabsByProj.get(id) || {}).active;
+  q.sessionId = sid; // remember which tab the queue drives, so only its activity advances it
+  lite.pty.write(sid, (q.items[q.pos].text || '') + '\r'); // '\r' = Enter → submits the prompt
+  q.awaitingBusy = true; // ignore «waiting» until the agent actually starts working on this note
+  queueChanged(q);
+}
+function queueStart(id) {
+  const q = getQueue(id);
+  if (!q.items.length) return;
+  const proj = projects.find((x) => x.id === id);
+  if (!proj) return;
+  ensureProjectTabs(proj);
+  setActive(id); // bring this project's terminal to the front when the run begins
+  q.running = true; q.pos = -1; q.awaitingBusy = false; q.armed = false;
+  queueDispatchNext(id); // first note goes immediately; the rest wait for «▶ Дальше»
+}
+function queueStop(id) {
+  const q = queues.get(id);
+  if (!q) return;
+  q.running = false; q.awaitingBusy = false; q.armed = false;
+  queueChanged(q);
+}
+// User-confirmed advance (semi-auto): «▶ Дальше» button, the armed notification's
+// click, or the Ctrl+Shift+Enter hotkey all route here.
+function queueAdvance(id) {
+  const q = queues.get(id);
+  if (!q || !q.running) return;
+  queueDispatchNext(id);
+}
+// Called from settleProject. Amber (waiting) is ambiguous — the agent could be done OR
+// asking a question / awaiting a permission. We can't tell from process state, so we DON'T
+// auto-send: we «arm» the queue (surface «▶ Дальше» + a notification) and let the user decide.
+function queueOnSettled(id, state) {
+  const q = queues.get(id);
+  if (!q || !q.running || q.awaitingBusy || q.armed) return;
+  if (state !== 'waiting') return;
+  // Complete when the last note's turn ended — OR when the queue was emptied mid-run.
+  // The length check is essential: without it an empty q.items makes the comparison
+  // `q.pos >= -1` (always true), so the queue would "complete" having sent nothing.
+  if (!q.items.length || q.pos >= q.items.length - 1) {
+    q.running = false; q.pos = q.items.length; q.armed = false;
+    queueChanged(q);
+    const p = projects.find((x) => x.id === id);
+    toast(`✓ Очередь выполнена${p ? ' — ' + p.name : ''}`);
+    return;
+  }
+  q.armed = true;
+  queueChanged(q);
+  queueNotifyArmed(id);
+}
+let lastQueueNotifyAt = 0;
+function queueNotifyArmed(id) {
+  const q = queues.get(id);
+  const p = projects.find((x) => x.id === id);
+  if (!q || !p) return;
+  const next = Math.min(q.pos + 2, q.items.length); // 1-based number of the note «▶ Дальше» will send
+  toast(`▶ ${p.name}: агент ждёт. Открой «Очередь» и нажми «Дальше» — заметка ${next}/${q.items.length}.`);
+  if (!settings.notifications || Date.now() - lastQueueNotifyAt < 1200) return;
+  if (id === activeId && document.hasFocus()) return; // foreground: toast + armed button is enough
+  lastQueueNotifyAt = Date.now();
+  try {
+    const n = new Notification(`▶ ${p.name} — очередь ждёт`, { body: `Готов отправить заметку ${next} из ${q.items.length}. Клик — отправить.`, silent: !settings.sound, tag: 'lite-q-' + id });
+    n.onclick = () => { lite.win.show(); setActive(id); queueAdvance(id); };
+  } catch (_) {}
+}
 let viewerOpen = false;
 let scratchOpen = false;     // системный терминал справа открыт
 let scratchRec = null;       // { term, fit, search } — один на приложение
@@ -91,25 +261,31 @@ let layout = loadLayout();
 let lastParent = STORE.lastParent || '';
 
 const TERM_THEME = {
-  background: '#0a120d', foreground: '#cfe6d9', cursor: '#3ddc84',
-  selectionBackground: '#1f4a36',
-  black: '#0a120d', red: '#f7768e', green: '#9ece6a', yellow: '#e0af68',
+  background: '#0d1116', foreground: '#cdd6e0', cursor: '#34d399',
+  selectionBackground: '#1f3a4d',
+  black: '#0d1116', red: '#f7768e', green: '#9ece6a', yellow: '#e0af68',
   blue: '#7aa2f7', magenta: '#bb9af7', cyan: '#7dcfff', white: '#a9b1d6',
 };
 // ---------------------------------------------------------------- themes (a curated few)
+// Theme registry. The CSS does the heavy lifting via body[data-theme] (token contract
+// in styles.css); here we carry the human label + per-theme terminal (xterm) colours.
+// To add a theme: add a block in styles.css AND an entry here. Default = neumorphism.
+const DEFAULT_THEME = 'neumorphism';
 const THEMES = {
-  emerald: { label: 'Изумруд', cursor: '#3ddc84', selectionBackground: '#1f4a36' },
-  ocean: { label: 'Океан', cursor: '#46cfe6', selectionBackground: '#1d4a55' },
-  violet: { label: 'Аметист', cursor: '#a98cf0', selectionBackground: '#3a2f5a' },
+  neumorphism: { label: 'Неоморфизм', term: { background: '#161a20', foreground: '#cfd4db', cursor: '#34d399', selectionBackground: '#1f3a30' } },
+  glass:       { label: 'Стекло',     term: { background: '#0b0f16', foreground: '#dbe5ee', cursor: '#5eead4', selectionBackground: '#13443c' } },
+  material:    { label: 'Material',   term: { background: '#121212', foreground: '#e0e0e0', cursor: '#26a69a', selectionBackground: '#004d40' } },
+  catppuccin:  { label: 'Catppuccin', term: { background: '#181825', foreground: '#cdd6f4', cursor: '#a6e3a1', selectionBackground: '#333b54' } },
+  gruvbox:     { label: 'Gruvbox',    term: { background: '#282828', foreground: '#ebdbb2', cursor: '#fabd2f', selectionBackground: '#504945' } },
+  aurora:      { label: 'Aurora',     term: { background: '#0a0f14', foreground: '#dbe7f0', cursor: '#2dd4bf', selectionBackground: '#0f4a44' } },
 };
 function termTheme() {
-  const t = THEMES[settings.theme] || THEMES.emerald;
-  return { ...TERM_THEME, cursor: t.cursor, selectionBackground: t.selectionBackground };
+  const t = THEMES[settings.theme] || THEMES[DEFAULT_THEME];
+  return { ...TERM_THEME, ...t.term };
 }
 function applyTheme() {
-  const name = THEMES[settings.theme] ? settings.theme : 'emerald';
-  if (name === 'emerald') document.body.removeAttribute('data-theme');
-  else document.body.dataset.theme = name;
+  const name = THEMES[settings.theme] ? settings.theme : DEFAULT_THEME;
+  document.body.dataset.theme = name; // always set; index.html ships data-theme too so there's no flash
   for (const rec of terms.values()) { try { rec.term.options.theme = termTheme(); } catch (_) {} }
   if (scratchRec) { try { scratchRec.term.options.theme = termTheme(); } catch (_) {} }
 }
@@ -121,6 +297,9 @@ function saveProjects() { persist('projects', projects); }
 function loadProjectsFromDisk() { return Array.isArray(STORE.projects) ? STORE.projects : []; }
 function loadLayout() { return { ...DEFAULT_LAYOUT, ...(STORE.layout || {}) }; }
 function saveLayout() { persist('layout', layout); }
+// Whether the viewer / system terminal panes are open — part of the backed-up state,
+// restored on startup (and on import) so the window reopens the way it was left.
+function saveUiState() { persist('uiState', { viewerOpen, scratchOpen }); }
 function applyLayout() {
   $('#sidebar').style.flexBasis = layout.sidebar + 'px';
   $('#viewer-pane').style.flexBasis = layout.viewer + 'px';
@@ -171,9 +350,9 @@ function buildSections() {
   const cats = loadCategories();
   const favs = projects.filter((p) => p.favorite);
   return effectiveOrder().map((key) => {
-    if (key === FAV_KEY) return favs.length ? { key, label: '★ Избранное', list: favs, pinned: true } : null;
+    if (key === FAV_KEY) return favs.length ? { key, label: 'Избранное', list: favs, pinned: true } : null;
     if (key === UNCATEGORIZED) return { key, label: UNCATEGORIZED, pinned: false, list: projects.filter((p) => !p.favorite && !cats.includes(p.category)) };
-    if (key === ARCHIVE) { const list = projects.filter((p) => !p.favorite && p.category === ARCHIVE); return list.length ? { key, label: '🗄 Архив', list, pinned: false } : null; }
+    if (key === ARCHIVE) { const list = projects.filter((p) => !p.favorite && p.category === ARCHIVE); return list.length ? { key, label: 'Архив', list, pinned: false } : null; }
     return { key, label: key, pinned: false, list: projects.filter((p) => !p.favorite && p.category === key) };
   }).filter(Boolean);
 }
@@ -201,20 +380,21 @@ function renderSection(s, index, sections) {
   const sec = el('div', 'pgroup' + (pinned ? ' pinned' : ''));
   const collapsed = isCollapsed(key);
   const head = el('div', 'pgroup-head');
-  const chev = el('span', 'pgroup-chev', collapsed ? '▸' : '▾');
+  const chev = el('span', 'pgroup-chev');
+  chev.appendChild(icon(collapsed ? 'chevron-right' : 'chevron-down', 15));
   head.appendChild(chev);
   head.appendChild(el('span', 'pgroup-name', label));
   head.appendChild(el('span', 'pgroup-count', String(list.length)));
   const tools = el('div', 'pgroup-tools');
   const isCustomCat = key !== FAV_KEY && key !== UNCATEGORIZED && key !== ARCHIVE;
   if (isCustomCat) { // видимая кнопка переименования (плюс ПКМ-меню)
-    const ren = el('button', 'pgroup-arrow', '✎'); ren.title = 'Переименовать категорию';
+    const ren = iconBtn('pgroup-arrow', 'pencil', 'Переименовать категорию');
     ren.addEventListener('click', (e) => { e.stopPropagation(); renameCategory(key); });
     tools.appendChild(ren);
   }
   const nextIsArchive = sections[index + 1] && sections[index + 1].key === ARCHIVE;
-  const up = el('button', 'pgroup-arrow', '▲'); up.title = 'Выше'; up.disabled = index === 0 || key === ARCHIVE;
-  const down = el('button', 'pgroup-arrow', '▼'); down.title = 'Ниже'; down.disabled = index === total - 1 || key === ARCHIVE || nextIsArchive;
+  const up = iconBtn('pgroup-arrow', 'chevron-up', 'Выше'); up.disabled = index === 0 || key === ARCHIVE;
+  const down = iconBtn('pgroup-arrow', 'chevron-down', 'Ниже'); down.disabled = index === total - 1 || key === ARCHIVE || nextIsArchive;
   up.addEventListener('click', (e) => { e.stopPropagation(); moveSection(key, -1); });
   down.addEventListener('click', (e) => { e.stopPropagation(); moveSection(key, +1); });
   tools.appendChild(up); tools.appendChild(down);
@@ -223,7 +403,8 @@ function renderSection(s, index, sections) {
   if (collapsed) body.style.display = 'none';
   head.addEventListener('click', () => {
     const now = !isCollapsed(key); setCollapsed(key, now);
-    body.style.display = now ? 'none' : 'block'; chev.textContent = now ? '▸' : '▾';
+    body.style.display = now ? 'none' : 'block';
+    chev.replaceChildren(icon(now ? 'chevron-right' : 'chevron-down', 15));
   });
   if (key !== FAV_KEY && key !== UNCATEGORIZED && key !== ARCHIVE) // custom categories can be renamed/deleted (Архив — нет)
     head.addEventListener('contextmenu', (e) => { e.preventDefault(); showCategoryMenu(e.clientX, e.clientY, key); });
@@ -239,35 +420,46 @@ function makeCard(p) {
   if (p.accent) { card.classList.add('accented'); card.style.setProperty('--card-accent', p.accent); } // весь бордер + усиленная левая полоса
 
   const head = el('div', 'card-head');
-  const ind = el('span', 'pind ' + (projState.get(p.id) || 'quiet'));
+  const ind = el('span', 'pind ' + projAggState(p.id));
   ind.dataset.id = p.id;
   ind.title = 'Спиннер — работает · янтарный — ждёт ответа · точка — готов';
   const title = el('span', 'card-title', p.name);
   title.title = p.path;
-  const star = el('button', 'card-star' + (p.favorite ? ' on' : ''), p.favorite ? '★' : '☆');
-  star.title = p.favorite ? 'Убрать из избранного' : 'В избранное';
+  const star = iconBtn('card-star' + (p.favorite ? ' on' : ''), 'star', p.favorite ? 'Убрать из избранного' : 'В избранное', 15);
   star.addEventListener('click', (e) => { e.stopPropagation(); toggleFavorite(p.id); });
-  const kebab = el('button', 'card-kebab', '⋮');
-  kebab.title = 'Меню проекта';
+  const kebab = iconBtn('card-kebab', 'dots-v', 'Меню проекта', 18);
   kebab.addEventListener('click', (e) => { e.stopPropagation(); showCardMenu(e.clientX, e.clientY, p); });
   head.appendChild(ind); head.appendChild(title); head.appendChild(star); head.appendChild(kebab);
   card.appendChild(head);
 
-  if (missing.has(p.id)) card.appendChild(el('div', 'card-missing', '⚠ папка удалена — закрой проект'));
+  // путь не дублируем на карточке — он в тултипе имени и в ⋮-меню («Копировать путь»)
+  if (missing.has(p.id)) {
+    const w = el('div', 'card-missing'); w.appendChild(icon('warning', 13)); w.appendChild(el('span', null, 'папка удалена — закрой проект'));
+    card.appendChild(w);
+  }
 
-  const actions = el('div', 'card-actions');
-  const openViewer = el('button', null, '👁 вивер');
-  if (p.id === activeId && viewerOpen) openViewer.classList.add('on');
+  const foot = el('div', 'card-foot');
+  const openViewer = iconBtn('card-act' + (p.id === activeId && viewerOpen ? ' on' : ''), 'eye', 'Открыть/закрыть вивер');
   openViewer.addEventListener('click', (e) => {
     e.stopPropagation();
     if (activeId === p.id && viewerOpen) setViewerOpen(false);
     else { setActive(p.id); setViewerOpen(true); }
   });
+  const notesBtn = iconBtn('card-act', 'note', 'Заметки');
   const nc = noteCounts[p.id] || 0;
-  const notesBtn = el('button', null, nc ? `заметки · ${nc}` : 'заметки');
+  if (nc) notesBtn.appendChild(el('span', 'act-badge', String(nc)));
   notesBtn.addEventListener('click', (e) => { e.stopPropagation(); showNotes(p); });
-  actions.appendChild(openViewer); actions.appendChild(notesBtn);
-  card.appendChild(actions);
+  const gitBtn = iconBtn('card-act', 'git', 'Git');
+  gitBtn.addEventListener('click', (e) => { e.stopPropagation(); showGit(p); });
+  foot.appendChild(openViewer); foot.appendChild(notesBtn); foot.appendChild(gitBtn);
+  const qb = queues.get(p.id);
+  const qtxt = queueBadgeText(qb);
+  const qbadge = el('button', 'card-qbadge' + (qtxt ? ' show' : '') + (qb && qb.running ? ' running' : ''), qtxt);
+  qbadge.dataset.id = p.id;
+  qbadge.title = 'Авто-очередь заметок';
+  qbadge.addEventListener('click', (e) => { e.stopPropagation(); showNotes(p); });
+  foot.appendChild(qbadge);
+  card.appendChild(foot);
 
   card.addEventListener('click', () => setActive(p.id));
   card.addEventListener('contextmenu', (e) => { e.preventDefault(); showCardMenu(e.clientX, e.clientY, p); });
@@ -303,26 +495,26 @@ function showCardMenu(x, y, p) {
 }
 function buildCardMenuMain(dd, p) {
   dd.innerHTML = '';
-  dd.appendChild(menuRow('📁', 'Открыть в проводнике', () => { closeMenus(); lite.openInFileManager(p.path); }));
-  dd.appendChild(menuRow('⎇', 'Git', () => { closeMenus(); showGit(p); }));
-  dd.appendChild(menuRow('📝', 'Заметки', () => { closeMenus(); showNotes(p); }));
-  dd.appendChild(menuRow('⧉', 'Копировать путь', () => { closeMenus(); lite.copyText(p.path); toast('Путь скопирован'); }));
-  dd.appendChild(menuRow(p.favorite ? '★' : '☆', p.favorite ? 'Убрать из избранного' : 'В избранное', () => { closeMenus(); toggleFavorite(p.id); }));
+  dd.appendChild(menuRow('folder', 'Открыть в проводнике', () => { closeMenus(); lite.openInFileManager(p.path); }));
+  dd.appendChild(menuRow('git', 'Git', () => { closeMenus(); showGit(p); }));
+  dd.appendChild(menuRow('note', 'Заметки', () => { closeMenus(); showNotes(p); }));
+  dd.appendChild(menuRow('copy', 'Копировать путь', () => { closeMenus(); lite.copyText(p.path); toast('Путь скопирован'); }));
+  dd.appendChild(menuRow('star', p.favorite ? 'Убрать из избранного' : 'В избранное', () => { closeMenus(); toggleFavorite(p.id); }));
   dd.appendChild(el('div', 'menu-sep'));
-  dd.appendChild(menuRow('✎', 'Переименовать проект…', () => { closeMenus(); renameProject(p.id); }));
-  dd.appendChild(menuRow('🎨', 'Цвет проекта…', () => buildCardMenuColor(dd, p)));
-  dd.appendChild(menuRow('➜', 'Переместить в категорию…', () => buildCardMenuMove(dd, p)));
+  dd.appendChild(menuRow('pencil', 'Переименовать проект…', () => { closeMenus(); renameProject(p.id); }));
+  dd.appendChild(menuRow('palette', 'Цвет проекта…', () => buildCardMenuColor(dd, p)));
+  dd.appendChild(menuRow('arrow-right', 'Переместить в категорию…', () => buildCardMenuMove(dd, p)));
   if (p.category === ARCHIVE)
-    dd.appendChild(menuRow('🗄', 'Вернуть из архива', () => { closeMenus(); moveToCategory(p.id, null); }));
+    dd.appendChild(menuRow('archive', 'Вернуть из архива', () => { closeMenus(); moveToCategory(p.id, null); }));
   else
-    dd.appendChild(menuRow('🗄', 'В архив', () => { closeMenus(); archiveProject(p.id); }));
+    dd.appendChild(menuRow('archive', 'В архив', () => { closeMenus(); archiveProject(p.id); }));
   dd.appendChild(el('div', 'menu-sep'));
-  dd.appendChild(menuRow('✕', 'Закрыть проект', () => { closeMenus(); closeProject(p.id); }, 'danger'));
+  dd.appendChild(menuRow('x', 'Закрыть проект', () => { closeMenus(); closeProject(p.id); }, 'danger'));
 }
 const ACCENTS = ['#2fbf71', '#3dc8dc', '#7aa2f7', '#a98cf0', '#e06fae', '#e0af68', '#f7768e', '#8aa79a'];
 function buildCardMenuColor(dd, p) {
   dd.innerHTML = '';
-  dd.appendChild(menuRow('‹', 'Назад', () => buildCardMenuMain(dd, p), 'muted'));
+  dd.appendChild(menuRow('chevron-left', 'Назад', () => buildCardMenuMain(dd, p), 'muted'));
   dd.appendChild(el('div', 'menu-label', 'Цвет проекта'));
   const sw = el('div', 'accent-swatches');
   for (const c of ACCENTS) {
@@ -332,7 +524,7 @@ function buildCardMenuColor(dd, p) {
     sw.appendChild(b);
   }
   dd.appendChild(sw);
-  dd.appendChild(menuRow('✕', 'Сбросить цвет', () => { closeMenus(); setAccent(p.id, null); }, 'muted'));
+  dd.appendChild(menuRow('x', 'Сбросить цвет', () => { closeMenus(); setAccent(p.id, null); }, 'muted'));
 }
 function setAccent(id, c) {
   const p = projects.find((x) => x.id === id);
@@ -350,8 +542,8 @@ function showCategoryMenu(x, y, name) {
   closeMenus();
   const dd = el('div', 'menu-dropdown'); dd.style.minWidth = '190px';
   dd.addEventListener('click', (e) => e.stopPropagation());
-  dd.appendChild(menuRow('✎', 'Переименовать категорию…', () => { closeMenus(); renameCategory(name); }));
-  dd.appendChild(menuRow('🗑', 'Удалить категорию', () => { closeMenus(); deleteCategory(name); }, 'danger'));
+  dd.appendChild(menuRow('pencil', 'Переименовать категорию…', () => { closeMenus(); renameCategory(name); }));
+  dd.appendChild(menuRow('trash', 'Удалить категорию', () => { closeMenus(); deleteCategory(name); }, 'danger'));
   placeMenu(dd, x, y);
 }
 function renameCategory(old) {
@@ -373,16 +565,16 @@ function deleteCategory(name) {
 }
 function buildCardMenuMove(dd, p) {
   dd.innerHTML = '';
-  dd.appendChild(menuRow('‹', 'Назад', () => buildCardMenuMain(dd, p), 'muted'));
+  dd.appendChild(menuRow('chevron-left', 'Назад', () => buildCardMenuMain(dd, p), 'muted'));
   dd.appendChild(el('div', 'menu-label', 'Переместить в'));
   const cats = loadCategories();
   const opts = [UNCATEGORIZED, ...cats.filter((c) => c !== ARCHIVE)]; // Архив — через отдельный пункт «В архив»
   for (const c of opts) {
     const here = c === UNCATEGORIZED ? !cats.includes(p.category) : p.category === c;
-    dd.appendChild(menuRow(here ? '•' : ' ', c, () => { closeMenus(); moveToCategory(p.id, c === UNCATEGORIZED ? null : c); }));
+    dd.appendChild(menuRow(here ? 'check' : null, c, () => { closeMenus(); moveToCategory(p.id, c === UNCATEGORIZED ? null : c); }));
   }
   dd.appendChild(el('div', 'menu-sep'));
-  dd.appendChild(menuRow('✚', 'Создать новую…', () => { closeMenus(); showCreateCategory(p.id); }));
+  dd.appendChild(menuRow('plus', 'Создать новую…', () => { closeMenus(); showCreateCategory(p.id); }));
 }
 function showCreateCategory(id) {
   const { m, close } = makeModal(`
@@ -470,16 +662,54 @@ function applyLayoutSwap(ta) {
 async function showNotes(p) {
   let notes = await lite.store.notesGet(p.id);
   if (!Array.isArray(notes)) notes = [];
+  const q = getQueue(p.id);
+  // Detach the live-update callback on ANY close (button/Esc/backdrop) so the dismissed
+  // modal + its listeners don't linger in memory until the next queue event fires.
   const { m, close } = makeModal(`
     <h2>📝 Заметки — <span class="nm-proj"></span></h2>
-    <div class="nm-hint">Карточки промптов: «В терминал» отправляет текст в терминал проекта (без Enter). Порядок — стрелками ▲/▼ или перетаскиванием.</div>
-    <div class="nm-list" id="nm-list"></div>
-    <button class="btn nm-add" id="nm-add">＋ Новая карточка</button>
-    <div class="modal-actions"><button class="btn primary" id="nm-close">Готово</button></div>`);
+    <div class="nm-tabs">
+      <button class="nm-tab active" data-tab="notes">Карточки</button>
+      <button class="nm-tab" data-tab="queue">▶ Очередь<span class="nm-qbadge" id="nm-qbadge"></span></button>
+    </div>
+    <div class="nm-pane" id="nm-pane-notes">
+      <div class="nm-hint">«В терминал» отправляет текст без Enter. «＋ в очередь» добавляет карточку в авто-очередь (вкладка «Очередь»). Порядок — ▲/▼ или перетаскиванием.</div>
+      <div class="nm-list" id="nm-list"></div>
+      <button class="btn nm-add" id="nm-add">＋ Новая карточка</button>
+    </div>
+    <div class="nm-pane" id="nm-pane-queue" hidden></div>
+    <div class="modal-actions"><button class="btn primary" id="nm-close">Готово</button></div>`,
+    () => { q.onChange = null; });
   m.classList.add('notes-modal');
   m.querySelector('.nm-proj').textContent = p.name;
   const list = m.querySelector('#nm-list');
-  const save = () => { lite.store.notesSet(p.id, notes); noteCounts[p.id] = notes.length; renderProjects(); };
+  const qpane = m.querySelector('#nm-pane-queue');
+  const updateTabBadge = () => {
+    const b = m.querySelector('#nm-qbadge');
+    b.textContent = q.items.length ? String(q.items.length) : '';
+    b.classList.toggle('show', q.items.length > 0);
+  };
+  // Persist notes; keep queued snapshots in sync with edits and drop queued items
+  // whose underlying note was deleted (queue references notes by id).
+  const save = () => {
+    lite.store.notesSet(p.id, notes); noteCounts[p.id] = notes.length;
+    // Capture the running queue's cursor BY ID before refiltering, so deleting a note
+    // mid-run can't shift q.pos onto the wrong item (which would skip a note or make
+    // queueOnSettled finish early). doneIds = items already sent (before the cursor).
+    const running = q.running && q.pos >= 0 && q.pos < q.items.length;
+    const curId = running ? q.items[q.pos].noteId : null;
+    const doneIds = running ? new Set(q.items.slice(0, q.pos).map((it) => it.noteId)) : null;
+    q.items = q.items
+      .filter((it) => notes.some((n) => n.id === it.noteId))
+      .map((it) => ({ noteId: it.noteId, text: (notes.find((n) => n.id === it.noteId) || {}).text || '' }));
+    if (running) {
+      const ci = q.items.findIndex((it) => it.noteId === curId);
+      // current survived → its new index; current was deleted → sit just before the first
+      // remaining pending item so the next advance dispatches it instead of skipping it.
+      q.pos = ci >= 0 ? ci : q.items.filter((it) => doneIds.has(it.noteId)).length - 1;
+    }
+    updateTabBadge();
+    renderProjects();
+  };
   let dragFrom = null;
   let editing = null; // { note, ta } — открытый редактор карточки
   // Снять текст из открытого редактора в заметку (для авто-сохранения по «Готово»).
@@ -531,7 +761,22 @@ async function showNotes(p) {
       edit.addEventListener('click', () => editNote(row, note));
       const del = el('button', 'note-btn danger', '🗑'); del.title = 'Удалить';
       del.addEventListener('click', () => { notes.splice(i, 1); save(); render(); });
-      acts.append(up, down, sendDel, send, edit, del);
+      const qi = q.items.findIndex((it) => it.noteId === note.id);
+      const queued = qi >= 0;
+      const qBtn = el('button', 'note-btn qtoggle' + (queued ? ' on' : ''), queued ? `№ ${qi + 1}` : '＋ в очередь');
+      // While the queue runs, membership is frozen (matches the queue tab's disabled
+      // reorder/remove) — changing q.items mid-run would shift q.pos onto the wrong note.
+      qBtn.disabled = q.running;
+      qBtn.title = q.running ? 'Очередь выполняется — изменить состав нельзя' : (queued ? 'Убрать из авто-очереди' : 'Добавить в авто-очередь');
+      qBtn.addEventListener('click', () => {
+        if (q.running) return;
+        flushEdit();
+        const idx = q.items.findIndex((it) => it.noteId === note.id);
+        if (idx >= 0) q.items.splice(idx, 1);
+        else q.items.push({ noteId: note.id, text: note.text || '' });
+        queueChanged(q); updateTabBadge(); render();
+      });
+      acts.append(qBtn, up, down, sendDel, send, edit, del);
       row.append(acts);
       row.addEventListener('dragstart', () => { dragFrom = i; row.classList.add('dragging'); });
       row.addEventListener('dragend', () => row.classList.remove('dragging'));
@@ -552,16 +797,92 @@ async function showNotes(p) {
     const rows = list.querySelectorAll('.note-card');
     if (rows.length) editNote(rows[rows.length - 1], note);
   });
-  m.querySelector('#nm-close').onclick = () => { flushEdit(); close(); };
+
+  // ---- Queue tab ----
+  function swapQueue(i, j) {
+    if (j < 0 || j >= q.items.length) return;
+    [q.items[i], q.items[j]] = [q.items[j], q.items[i]];
+    queueChanged(q); renderQueue();
+  }
+  function renderQueue() {
+    qpane.innerHTML = '';
+    const bar = el('div', 'q-bar');
+    const status = el('div', 'q-status');
+    const next = Math.min(q.pos + 2, q.items.length);
+    if (!q.items.length) status.textContent = 'Очередь пуста — добавь карточки кнопкой «＋ в очередь».';
+    else if (q.armed) { status.textContent = `▶ Агент ждёт — нажми «Дальше» для заметки ${next} из ${q.items.length}`; status.classList.add('armed'); }
+    else if (q.running) { status.textContent = `Выполняется ${Math.min(q.pos + 1, q.items.length)} из ${q.items.length} — ждём, пока агент закончит ход…`; status.classList.add('run'); }
+    else status.textContent = `${q.items.length} в очереди — нажми «Старт».`;
+    bar.appendChild(status);
+    const ctrls = el('div', 'q-ctrls');
+    if (!q.running) {
+      const start = el('button', 'note-btn primary', '▶ Старт'); start.disabled = !q.items.length;
+      start.addEventListener('click', () => { queueStart(p.id); renderQueue(); });
+      ctrls.appendChild(start);
+    } else {
+      const adv = el('button', 'note-btn primary' + (q.armed ? ' armed' : ''), '▶ Дальше');
+      adv.title = 'Отправить следующую заметку (Ctrl+Shift+Enter)';
+      adv.addEventListener('click', () => { queueAdvance(p.id); renderQueue(); });
+      const stop = el('button', 'note-btn danger', '⏹ Стоп');
+      stop.addEventListener('click', () => { queueStop(p.id); renderQueue(); });
+      ctrls.append(adv, stop);
+    }
+    const clear = el('button', 'note-btn', '🗑 Очистить'); clear.disabled = !q.items.length;
+    clear.addEventListener('click', () => { q.items = []; q.running = false; q.pos = -1; q.awaitingBusy = false; q.armed = false; queueChanged(q); updateTabBadge(); renderQueue(); });
+    ctrls.appendChild(clear);
+    bar.appendChild(ctrls);
+    qpane.appendChild(bar);
+    qpane.appendChild(el('div', 'nm-hint', 'Первая карточка уходит сразу при старте (с Enter). Следующая — НЕ автоматически: когда агент закончит ход и индикатор станет янтарным, прилетит уведомление, а тут загорится «▶ Дальше» (или Ctrl+Shift+Enter в активном проекте). Так агент успевает задать вопрос, а ты решаешь, слать ли следующую.'));
+    const qlist = el('div', 'nm-list');
+    q.items.forEach((it, i) => {
+      let cls = 'pending';
+      if (q.running) { if (i < q.pos) cls = 'done'; else if (i === q.pos) cls = 'current'; }
+      const row = el('div', 'q-card q-' + cls);
+      const num = el('span', 'q-num', cls === 'done' ? '✓' : cls === 'current' ? '▶' : String(i + 1));
+      const txt = el('div', 'q-text', it.text || '(пусто)');
+      const acts = el('div', 'note-acts');
+      const up = el('button', 'note-btn nudge', '▲'); up.title = 'Выше'; up.disabled = i === 0 || q.running;
+      up.addEventListener('click', () => swapQueue(i, i - 1));
+      const down = el('button', 'note-btn nudge', '▼'); down.title = 'Ниже'; down.disabled = i === q.items.length - 1 || q.running;
+      down.addEventListener('click', () => swapQueue(i, i + 1));
+      const rm = el('button', 'note-btn danger', '✕'); rm.title = 'Убрать из очереди'; rm.disabled = q.running;
+      rm.addEventListener('click', () => { q.items.splice(i, 1); queueChanged(q); updateTabBadge(); renderQueue(); });
+      acts.append(up, down, rm);
+      row.append(num, txt, acts);
+      qlist.appendChild(row);
+    });
+    if (!q.items.length) qlist.appendChild(el('div', 'nm-empty', 'Пусто.'));
+    qpane.appendChild(qlist);
+  }
+
+  // ---- tabs + live sync ----
+  const panes = { notes: m.querySelector('#nm-pane-notes'), queue: qpane };
+  const tabs = m.querySelectorAll('.nm-tab');
+  function setTab(name) {
+    tabs.forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+    Object.entries(panes).forEach(([k, pane]) => { pane.hidden = k !== name; });
+    if (name === 'queue') renderQueue(); else render();
+  }
+  tabs.forEach((t) => t.addEventListener('click', () => setTab(t.dataset.tab)));
+  // Background auto-advance keeps the open modal live (and detaches itself once closed).
+  q.onChange = () => {
+    if (!m.isConnected) { q.onChange = null; return; }
+    updateTabBadge();
+    if (!qpane.hidden) renderQueue();
+  };
+
+  m.querySelector('#nm-close').onclick = () => { flushEdit(); close(); }; // close() nulls q.onChange via onClose
+  updateTabBadge();
   render();
 }
 function sendNoteToTerminal(p, text) {
   if (!text) return;
   const proj = projects.find((x) => x.id === p.id);
   if (!proj) return;
-  ensureTerminal(proj);
+  ensureProjectTabs(proj);
   setActive(proj.id);
-  lite.pty.write(proj.id, text); // no trailing newline — review, then press Enter yourself
+  const sid = (tabsByProj.get(proj.id) || {}).active;
+  if (sid) lite.pty.write(sid, text); // no trailing newline — review, then press Enter yourself
 }
 
 // ---------------------------------------------------------------- light git panel (#3)
@@ -628,6 +949,27 @@ async function showGit(p) {
       };
       const cancel = el('button', 'btn', 'Закрыть'); cancel.onclick = close;
       row.append(init, cancel); body.appendChild(row);
+
+      body.appendChild(el('div', 'gm-or', 'или клонировать репозиторий в эту папку'));
+      const cloneRow = el('div', 'gm-actions');
+      const url = el('input', 'gm-cloneurl'); url.type = 'text';
+      url.placeholder = 'URL репозитория (https://… или git@…)';
+      const clone = el('button', 'btn', '⬇ git clone');
+      const doClone = async () => {
+        const u = url.value.trim();
+        if (!u) { toast('Введи URL репозитория', { kind: 'err' }); return; }
+        clone.disabled = true; const lbl = clone.textContent; clone.textContent = 'Клонирую…';
+        const r = await lite.git.clone(p.path, u);
+        clone.disabled = false; clone.textContent = lbl;
+        if (r.ok) {
+          toast('Репозиторий склонирован');
+          refresh(); renderProjects();
+          if (p.id === activeId) refreshTree();
+        } else toast(r.error || 'ошибка clone', { kind: 'err', ttl: 9000 });
+      };
+      clone.onclick = doClone;
+      url.addEventListener('keydown', (e) => { if (e.key === 'Enter') doClone(); });
+      cloneRow.append(url, clone); body.appendChild(cloneRow);
       return;
     }
     const head = el('div', 'gm-branch');
@@ -708,7 +1050,7 @@ function renderMiniRail() {
     const btn = el('button', 'rail-btn');
     if (p.id === activeId) btn.classList.add('active');
     btn.title = p.name;
-    const ind = el('span', 'pind ' + (projState.get(p.id) || 'quiet'));
+    const ind = el('span', 'pind ' + projAggState(p.id));
     ind.dataset.id = p.id;
     btn.appendChild(ind);
     btn.appendChild(el('span', 'rail-name', p.name));
@@ -745,20 +1087,25 @@ function closeProject(id) {
   );
 }
 function doCloseProject(id) {
+  // Closing the project whose unsaved file is open in the viewer would silently drop those
+  // edits — run the save/discard prompt first, then re-enter (dirty is false → falls through).
+  if (dirty && currentFile && activeId === id) { guardDirty(() => doCloseProject(id)); return; }
   const closing = projects.find((p) => p.id === id);
   if (closing) { // remember the close so a scan-dir project doesn't reappear next launch
     const dis = new Set(STORE.dismissed || []); dis.add(closing.path); persist('dismissed', [...dis]);
   }
   if (closing && watchedRoot === closing.path) { lite.fs.unwatch(closing.path); watchedRoot = null; }
-  lite.pty.kill(id);
-  const rec = terms.get(id);
-  if (rec) {
-    clearTimeout(rec.idleTimer);
-    try { rec.term.dispose(); } catch (_) {}
-    rec.container.remove();
-    terms.delete(id);
+  const tabs = tabsByProj.get(id);
+  if (tabs) {
+    for (const sid of tabs.sessions) {
+      lite.pty.kill(sid);
+      const rec = terms.get(sid);
+      if (rec) { clearTimeout(rec.idleTimer); try { rec.term.dispose(); } catch (_) {} rec.container.remove(); terms.delete(sid); }
+      projState.delete(sid);
+    }
+    tabsByProj.delete(id);
   }
-  projState.delete(id);
+  const pt = { ...(STORE.projTabs || {}) }; delete pt[id]; persist('projTabs', pt);
   missing.delete(id);
   projects = projects.filter((p) => p.id !== id);
   saveProjects();
@@ -796,9 +1143,11 @@ const stripAnsi = (str) => str.replace(ANSI_RE, '');
 const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 const hasRealBell = (s) => s.replace(OSC_RE, '').includes('\x07');
 
-function setProjState(id, state) {
-  projState.set(id, state);
-  document.querySelectorAll(`.pind[data-id="${id}"]`).forEach((ind) => { ind.className = 'pind ' + state; });
+function setProjState(sid, state) {
+  projState.set(sid, state);
+  const rec = terms.get(sid);
+  document.querySelectorAll(`.tab[data-sid="${sid}"] .tab-dot`).forEach((d) => { d.className = 'tab-dot pind ' + state; });
+  if (rec) refreshProjIndicator(rec.projId); // card/rail show the project aggregate
   updateAttention();
 }
 function markActivity(id, data) {
@@ -813,6 +1162,7 @@ function markActivity(id, data) {
   rec.tail = stripAnsi((rec.tail || '') + (data || '')).slice(-400);
   rec.activitySeq = (rec.activitySeq || 0) + 1; // lets a pending settle detect that new output arrived
   if (projState.get(id) !== 'busy') { rec.busyStart = Date.now(); setProjState(id, 'busy'); }
+  const q = queues.get(rec.projId); if (q && q.running && q.sessionId === id) q.awaitingBusy = false; // dispatched note now running
   clearTimeout(rec.idleTimer);
   rec.idleTimer = setTimeout(() => settleProject(id), settings.idleMs);
 }
@@ -839,7 +1189,12 @@ async function settleProject(id) {
   const worked = rec.sawBell || (Date.now() - (rec.busyStart || 0)) >= 1500; // skip trivial blips
   rec.sawBell = false;
   setProjState(id, waiting ? 'waiting' : 'quiet');
-  if (worked && (id !== activeId || !document.hasFocus())) notifyAgent(id, waiting ? 'waiting' : 'quiet');
+  const pid = rec.projId;
+  const q = queues.get(pid);
+  const qTargets = !!(q && q.running && q.sessionId === id); // this session is the queue's target tab
+  if (qTargets) queueOnSettled(pid, waiting ? 'waiting' : 'quiet');
+  // a running queue posts its own «Дальше» notification; notify per project on a non-visible tab
+  if (!qTargets && worked && (id !== activeSessionId() || !document.hasFocus())) notifyAgent(pid, waiting ? 'waiting' : 'quiet');
 }
 
 let lastNotifyAt = 0;
@@ -924,8 +1279,29 @@ function loadFastRenderer(term) {
   try { term.loadAddon(new CanvasAddon()); } catch (_) {}
 }
 
-function ensureTerminal(proj) {
-  if (terms.has(proj.id)) return terms.get(proj.id);
+// ---- terminal sessions (tabs) ----
+// Each project owns ≥1 SESSION (tab) = its own PTY + xterm. `terms` is keyed by sessionId;
+// `tabsByProj` keeps per-project order + active session. Tab NAMES persist across restarts
+// (projTabs store); PTYs don't, so tabs are recreated empty on next launch.
+function activeSessionId() { const t = tabsByProj.get(activeId); return t ? t.active : null; }
+function projSessions(projId) { const t = tabsByProj.get(projId); return t ? t.sessions : []; }
+function projAggState(projId) {
+  const ss = projSessions(projId).map((s) => projState.get(s));
+  return ss.includes('busy') ? 'busy' : ss.includes('waiting') ? 'waiting' : 'quiet';
+}
+function refreshProjIndicator(projId) {
+  const st = projAggState(projId);
+  document.querySelectorAll(`.pind[data-id="${projId}"]`).forEach((i) => { i.className = 'pind ' + st; });
+}
+function saveProjTabs() {
+  const out = {};
+  for (const [pid, t] of tabsByProj) {
+    out[pid] = { names: t.sessions.map((s) => (terms.get(s) || {}).name || 'Терминал'), active: t.sessions.indexOf(t.active) };
+  }
+  persist('projTabs', out);
+}
+function createSession(proj, name) {
+  const id = proj.id + '::t' + (++sessionSeq);
   const container = el('div', 'term-instance');
   $('#terminals').appendChild(container);
   const term = new Terminal({
@@ -938,71 +1314,161 @@ function ensureTerminal(proj) {
   term.loadAddon(search);
   term.loadAddon(new WebLinksAddon((_e, uri) => lite.openExternal(uri)));
   term.open(container);
-  loadFastRenderer(term); // GPU/Canvas renderer → плавный скролл вместо тормозного DOM-рендера
+  loadFastRenderer(term);
   fit.fit();
-  term.registerLinkProvider(fileLinkProvider(term, proj.path)); // src/app.js:42 → viewer
-  lite.pty.create({ id: proj.id, cwd: proj.path, cols: term.cols, rows: term.rows });
+  term.registerLinkProvider(fileLinkProvider(term, proj.path));
+  lite.pty.create({ id, cwd: proj.path, cols: term.cols, rows: term.rows });
   term.onData((data) => {
-    const r = terms.get(proj.id);
-    if (r) r.lastInputAt = Date.now(); // mark typing so its echo isn't counted as agent activity
-    lite.pty.write(proj.id, data);
+    const r = terms.get(id);
+    if (r) r.lastInputAt = Date.now();
+    lite.pty.write(id, data);
   });
-  term.onResize(({ cols, rows }) => lite.pty.resize(proj.id, cols, rows));
-
-  // Ctrl+V → paste from OS clipboard (Ctrl+C left alone so it stays SIGINT).
+  term.onResize(({ cols, rows }) => lite.pty.resize(id, cols, rows));
   term.attachCustomKeyEventHandler((e) => {
-    if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'v' || e.key === 'V')) {
-      pasteInto(proj.id);
-      return false;
-    }
-    if (e.type === 'keydown' && e.ctrlKey && !e.altKey && (e.key === 'f' || e.key === 'F')) {
-      openTermSearch();
-      return false;
+    if (e.type !== 'keydown') return true;
+    // Match by physical key (e.code), NOT e.key — so Ctrl+C/V/F etc. work in ANY keyboard
+    // layout (in Russian layout Ctrl+V gives e.key='м', which the old e.key check missed).
+    if (e.ctrlKey && e.shiftKey && e.code === 'KeyT') { addTab(); return false; }
+    if (e.ctrlKey && e.shiftKey && e.code === 'KeyW') { const s = activeSessionId(); if (s) closeTab(s); return false; }
+    if (e.ctrlKey && (e.key === 'PageDown' || e.key === 'PageUp')) { cycleTab(e.key === 'PageDown' ? 1 : -1); return false; }
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyC') return !copySelection(term); // copied → swallow; else SIGINT
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyV') { pasteInto(id); return false; }
+    if (e.ctrlKey && !e.altKey && e.code === 'KeyF') { openTermSearch(); return false; }
+    if (e.ctrlKey && e.shiftKey && e.key === 'Enter') {
+      const q = queues.get(proj.id);
+      if (q && q.running) { queueAdvance(proj.id); return false; }
     }
     return true;
   });
-  // right-click → copy/paste menu
-  container.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    showTermMenu(e.clientX, e.clientY, term, proj.id);
+  container.addEventListener('contextmenu', (e) => { e.preventDefault(); showTermMenu(e.clientX, e.clientY, term, id); });
+  const rec = { term, fit, search, container, projId: proj.id, name, idleTimer: null, sawBell: false, tail: '', busyStart: 0, lastInputAt: 0, activitySeq: 0 };
+  terms.set(id, rec);
+  tabsByProj.get(proj.id).sessions.push(id);
+  return id;
+}
+// Ensure a project's sessions exist (restoring saved tab names on first open).
+function ensureProjectTabs(proj) {
+  if (tabsByProj.has(proj.id)) return;
+  tabsByProj.set(proj.id, { sessions: [], active: null });
+  const saved = (STORE.projTabs || {})[proj.id];
+  const names = saved && Array.isArray(saved.names) && saved.names.length ? saved.names : ['Терминал 1'];
+  names.forEach((n) => createSession(proj, n));
+  const t = tabsByProj.get(proj.id);
+  const ai = saved && Number.isInteger(saved.active) ? saved.active : 0;
+  t.active = t.sessions[Math.max(0, Math.min(ai, t.sessions.length - 1))] || t.sessions[0];
+  saveProjTabs();
+}
+function renderTabBar() {
+  const header = $('#term-header');
+  const bar = $('#term-tabs');
+  if (!bar) return;
+  bar.innerHTML = '';
+  const t = tabsByProj.get(activeId);
+  if (!activeId || !t || !t.sessions.length) { if (header) header.style.display = 'none'; return; }
+  if (header) header.style.display = 'flex';
+  t.sessions.forEach((sid) => {
+    const rec = terms.get(sid); if (!rec) return;
+    const tab = el('div', 'tab' + (sid === t.active ? ' active' : ''));
+    tab.dataset.sid = sid;
+    tab.appendChild(el('span', 'tab-dot pind ' + (projState.get(sid) || 'quiet')));
+    tab.appendChild(el('span', 'tab-name', rec.name));
+    if (t.sessions.length > 1) {
+      const x = iconBtn('tab-close', 'x', 'Закрыть вкладку (Ctrl+Shift+W)', 12);
+      x.addEventListener('click', (e) => { e.stopPropagation(); closeTab(sid); });
+      tab.appendChild(x);
+    }
+    tab.addEventListener('click', () => switchTab(sid));
+    tab.addEventListener('dblclick', () => renameTab(sid));
+    bar.appendChild(tab);
   });
-
-  const rec = { term, fit, search, container, idleTimer: null, sawBell: false, tail: '', busyStart: 0, lastInputAt: 0, activitySeq: 0 };
-  terms.set(proj.id, rec);
-  return rec;
+  const add = iconBtn('tab-add', 'plus', 'Новая вкладка (Ctrl+Shift+T)', 15);
+  add.addEventListener('click', () => addTab());
+  bar.appendChild(add);
+}
+function switchTab(sid) {
+  const t = tabsByProj.get(activeId);
+  if (!t || !terms.has(sid)) return;
+  t.active = sid; saveProjTabs(); showActiveTerminal();
+}
+function addTab() {
+  const proj = activeProject(); if (!proj) return;
+  ensureProjectTabs(proj);
+  const t = tabsByProj.get(proj.id);
+  const sid = createSession(proj, 'Терминал ' + (t.sessions.length + 1));
+  t.active = sid; saveProjTabs(); showActiveTerminal();
+}
+function closeTab(sid) {
+  const t = tabsByProj.get(activeId); if (!t || t.sessions.length <= 1) return; // keep ≥1 tab
+  lite.pty.kill(sid);
+  const rec = terms.get(sid);
+  if (rec) { clearTimeout(rec.idleTimer); try { rec.term.dispose(); } catch (_) {} rec.container.remove(); terms.delete(sid); }
+  projState.delete(sid);
+  const i = t.sessions.indexOf(sid);
+  t.sessions.splice(i, 1);
+  if (t.active === sid) t.active = t.sessions[Math.max(0, i - 1)];
+  saveProjTabs(); showActiveTerminal();
+  refreshProjIndicator(activeId); updateAttention();
+}
+function cycleTab(dir) {
+  const t = tabsByProj.get(activeId); if (!t || t.sessions.length < 2) return;
+  let i = t.sessions.indexOf(t.active) + dir;
+  if (i < 0) i = t.sessions.length - 1; if (i >= t.sessions.length) i = 0;
+  switchTab(t.sessions[i]);
+}
+function renameTab(sid) {
+  const rec = terms.get(sid); if (!rec) return;
+  showPrompt('Переименовать вкладку', 'Название', rec.name, (v) => { rec.name = v; saveProjTabs(); renderTabBar(); });
 }
 async function pasteInto(id) {
   const text = await lite.readClipboard();
   if (text) lite.pty.write(id, text);
+  // Reading the clipboard is async (IPC round-trip) and the right-click menu steals
+  // focus — without this the terminal looks "frozen" until clicked. Refocus the xterm.
+  const rec = id === SCRATCH_ID ? scratchRec : terms.get(id);
+  if (rec && rec.term) { try { rec.term.focus(); } catch (_) {} }
+}
+// Smart Ctrl+C: if there's a non-empty selection, copy it (and clear, so the next
+// Ctrl+C can still send SIGINT) and report handled; otherwise return false so the
+// keypress falls through to the PTY as the interrupt signal. Mirrors the menu's copy.
+function copySelection(term) {
+  if (term.hasSelection && term.hasSelection()) {
+    const sel = term.getSelection();
+    if (sel) { lite.copyText(sel); if (term.clearSelection) term.clearSelection(); return true; }
+  }
+  return false;
 }
 
 function showActiveTerminal() {
+  const asid = activeSessionId();
   $('#empty-hint').style.display = activeId ? 'none' : 'flex';
-  for (const [id, rec] of terms) rec.container.style.display = id === activeId ? 'block' : 'none';
+  for (const [sid, rec] of terms) rec.container.style.display = sid === asid ? 'block' : 'none';
+  renderTabBar();
   refitActiveTerminal(true);
 }
 function refitActiveTerminal(focusIt) {
-  const rec = terms.get(activeId);
+  const asid = activeSessionId();
+  const rec = asid ? terms.get(asid) : null;
   if (!rec) return;
   requestAnimationFrame(() => {
-    try { rec.fit.fit(); lite.pty.resize(activeId, rec.term.cols, rec.term.rows); if (focusIt) rec.term.focus(); } catch (_) {}
+    try { rec.fit.fit(); lite.pty.resize(asid, rec.term.cols, rec.term.rows); if (focusIt) rec.term.focus(); } catch (_) {}
   });
 }
 function clearTerminal(id) {
   if (id === SCRATCH_ID) { if (scratchRec) { try { scratchRec.term.clear(); } catch (_) {} scratchRec.term.focus(); } return; }
-  const rec = terms.get(id || activeId); if (rec) { try { rec.term.clear(); } catch (_) {} rec.term.focus(); }
+  const sid = (id && terms.has(id)) ? id : activeSessionId();
+  const rec = terms.get(sid); if (rec) { try { rec.term.clear(); } catch (_) {} rec.term.focus(); }
 }
 function restartTerminal(id) {
   if (id === SCRATCH_ID) { restartScratch(); return; }
-  const pid = id || activeId;
-  const proj = projects.find((p) => p.id === pid);
-  const rec = terms.get(pid);
+  const sid = (id && terms.has(id)) ? id : activeSessionId();
+  const rec = terms.get(sid);
+  const proj = rec && projects.find((p) => p.id === rec.projId);
   if (!proj || !rec) return;
   try { rec.term.reset(); } catch (_) {}
   rec.sawBell = false; rec.tail = ''; rec.busyStart = Date.now();
   clearTimeout(rec.idleTimer);
-  setProjState(pid, 'busy');
-  lite.pty.restart({ id: pid, cwd: proj.path, cols: rec.term.cols, rows: rec.term.rows });
+  setProjState(sid, 'busy');
+  lite.pty.restart({ id: sid, cwd: proj.path, cols: rec.term.cols, rows: rec.term.rows });
   rec.term.focus();
 }
 
@@ -1028,7 +1494,10 @@ function ensureScratchTerminal() {
   term.onData((data) => lite.pty.write(SCRATCH_ID, data));
   term.onResize(({ cols, rows }) => lite.pty.resize(SCRATCH_ID, cols, rows));
   term.attachCustomKeyEventHandler((e) => {
-    if (e.type === 'keydown' && e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'v' || e.key === 'V')) { pasteInto(SCRATCH_ID); return false; }
+    if (e.type !== 'keydown') return true;
+    // match by physical key so copy/paste work in any layout (Russian incl.)
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyC') return !copySelection(term); // copied → swallow; else SIGINT
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyV') { pasteInto(SCRATCH_ID); return false; }
     return true;
   });
   container.addEventListener('contextmenu', (e) => { e.preventDefault(); showTermMenu(e.clientX, e.clientY, term, SCRATCH_ID); });
@@ -1041,14 +1510,15 @@ function refitScratch(focusIt) {
     try { scratchRec.fit.fit(); lite.pty.resize(SCRATCH_ID, scratchRec.term.cols, scratchRec.term.rows); if (focusIt) scratchRec.term.focus(); } catch (_) {}
   });
 }
-function setScratchOpen(open) {
+function setScratchOpen(open, opts = {}) {
   if (open === scratchOpen) { if (open) refitScratch(true); return; }
   const delta = layout.scratch + GUTTER;
   scratchOpen = open;
   $('#scratch-pane').classList.toggle('hidden', !open);
   $('#gutter-scratch').classList.toggle('hidden', !open);
   $('#btn-scratch').classList.toggle('on', open);
-  lite.win.growBy(open ? delta : -delta);
+  if (opts.grow !== false) lite.win.growBy(open ? delta : -delta); // grow:false on restore — saved width already counts this pane
+  saveUiState();
   if (open) { ensureScratchTerminal(); setTimeout(() => refitScratch(true), 150); }
   setTimeout(refitActiveTerminal, 160);
 }
@@ -1102,7 +1572,7 @@ function guardDirty(proceed) {
     'Несохранённые изменения',
     `Файл «${baseName(currentFile)}» изменён. Сохранить перед переключением?`,
     'Сохранить',
-    async () => { await saveCurrent(); proceed(); },
+    async () => { if (await saveCurrent()) proceed(); }, // failed save → stay put, don't lose edits
     'Не сохранять',
     () => { markDirty(false); proceed(); },
   );
@@ -1120,7 +1590,7 @@ function doSetActive(id) {
   activeId = id;
   if (watchedRoot && watchedRoot !== proj.path) lite.fs.unwatch(watchedRoot);
   lite.fs.watch(proj.path); watchedRoot = proj.path;
-  ensureTerminal(proj);
+  ensureProjectTabs(proj);
   renderProjects();
   showActiveTerminal();
   applyFontSize();
@@ -1277,11 +1747,17 @@ function setEditorText(text, lang) {
   loadingDoc = false;
 }
 function markDirty(v) { dirty = v; $('#viewer-dirty').classList.toggle('show', v); }
+// Returns true when the file is safely on disk (or there was nothing to save), false on a
+// failed write. Callers that gate a destructive next step (guardDirty) must NOT proceed on
+// false, or the unsaved edits are lost.
 async function saveCurrent() {
-  if (!currentFile || !dirty) return;
-  const res = await lite.fs.writeFile(currentFile, editor.state.doc.toString());
-  if (res.ok) markDirty(false);
-  else toast(`Не удалось сохранить: ${res.error || 'ошибка записи'}`, { kind: 'err', ttl: 6000 });
+  if (!currentFile || !dirty) return true;
+  let res;
+  try { res = await lite.fs.writeFile(currentFile, editor.state.doc.toString()); }
+  catch (e) { res = { error: String(e) }; }
+  if (res && res.ok) { markDirty(false); return true; }
+  toast(`Не удалось сохранить: ${(res && res.error) || 'ошибка записи'}`, { kind: 'err', ttl: 6000 });
+  return false;
 }
 
 // ---------------------------------------------------------------- git diff in the viewer
@@ -1369,7 +1845,7 @@ async function refreshViewerForActive() {
   clearViewer();
 }
 
-function setViewerOpen(open) {
+function setViewerOpen(open, opts = {}) {
   if (open === viewerOpen) {
     if (open) refreshViewerForActive();
     renderProjects();
@@ -1380,7 +1856,8 @@ function setViewerOpen(open) {
   $('#viewer-pane').classList.toggle('hidden', !open);
   $('#tree-pane').classList.toggle('hidden', !open);
   document.querySelectorAll('.gutter-v').forEach((g) => g.classList.toggle('hidden', !open));
-  lite.win.growBy(open ? delta : -delta);
+  if (opts.grow !== false) lite.win.growBy(open ? delta : -delta); // grow:false on restore — saved width already counts these panes
+  saveUiState();
   renderProjects();
   if (open) refreshViewerForActive();
   setTimeout(refitActiveTerminal, 150);
@@ -1537,19 +2014,19 @@ function showTreeMenu(x, y, ent) {
   const dd = el('div', 'menu-dropdown'); dd.style.minWidth = '190px';
   dd.addEventListener('click', (e) => e.stopPropagation());
   if (ent.dir) {
-    dd.appendChild(menuRow('📄', 'Новый файл…', () => { closeMenus(); treeNewFile(ent.path); }));
-    dd.appendChild(menuRow('📁', 'Новая папка…', () => { closeMenus(); treeNewFolder(ent.path); }));
+    dd.appendChild(menuRow('file', 'Новый файл…', () => { closeMenus(); treeNewFile(ent.path); }));
+    dd.appendChild(menuRow('folder', 'Новая папка…', () => { closeMenus(); treeNewFolder(ent.path); }));
     dd.appendChild(el('div', 'menu-sep'));
   } else {
-    dd.appendChild(menuRow('👁', 'Открыть', () => { closeMenus(); if (!viewerOpen) setViewerOpen(true); guardDirty(() => openFile(ent.path)); }));
-    if (['html', 'htm'].includes(extOf(ent.name))) dd.appendChild(menuRow('🌐', 'Открыть в браузере', () => { closeMenus(); lite.openInFileManager(ent.path); }));
+    dd.appendChild(menuRow('eye', 'Открыть', () => { closeMenus(); if (!viewerOpen) setViewerOpen(true); guardDirty(() => openFile(ent.path)); }));
+    if (['html', 'htm'].includes(extOf(ent.name))) dd.appendChild(menuRow('globe', 'Открыть в браузере', () => { closeMenus(); lite.openInFileManager(ent.path); }));
     dd.appendChild(el('div', 'menu-sep'));
   }
   if (!ent.root) {
-    dd.appendChild(menuRow('✎', 'Переименовать…', () => { closeMenus(); treeRename(ent); }));
-    dd.appendChild(menuRow('🗑', 'Удалить…', () => { closeMenus(); treeDelete(ent); }, 'danger'));
+    dd.appendChild(menuRow('pencil', 'Переименовать…', () => { closeMenus(); treeRename(ent); }));
+    dd.appendChild(menuRow('trash', 'Удалить…', () => { closeMenus(); treeDelete(ent); }, 'danger'));
   }
-  dd.appendChild(menuRow('⧉', 'Копировать путь', () => { closeMenus(); lite.copyText(ent.path); toast('Путь скопирован'); }));
+  dd.appendChild(menuRow('copy', 'Копировать путь', () => { closeMenus(); lite.copyText(ent.path); toast('Путь скопирован'); }));
   placeMenu(dd, x, y);
 }
 
@@ -1624,6 +2101,7 @@ function placeMenu(dd, x, y) {
 function openTopMenu(name, btn) {
   closeMenus();
   if (name === 'about') { showAbout(); return; }
+  if (name === 'logs') { showLogs(); return; }
   openMenuName = name;
   btn.classList.add('open');
   const dd = el('div', 'menu-dropdown');
@@ -1633,16 +2111,52 @@ function openTopMenu(name, btn) {
   const r = btn.getBoundingClientRect();
   placeMenu(dd, r.left, r.bottom + 4);
 }
-function menuRow(icon, text, onClick, cls) {
+// `glyph` is an ICONS name (rendered as SVG); a non-icon string falls back to text; falsy → empty slot.
+function menuRow(glyph, text, onClick, cls) {
   const row = el('div', 'menu-row' + (cls ? ' ' + cls : ''));
-  const ic = el('span', null, icon); ic.style.width = '16px'; ic.style.textAlign = 'center';
+  const ic = el('span', 'menu-ic');
+  if (glyph && ICONS[glyph]) ic.appendChild(icon(glyph, 16));
+  else if (glyph) ic.textContent = glyph;
   row.appendChild(ic); row.appendChild(el('span', null, text));
   if (onClick) row.addEventListener('click', onClick);
   return row;
 }
+// Back up the whole editor state to one JSON file, then offer to open its folder.
+async function exportSettings() {
+  closeMenus();
+  const r = await lite.settings.export();
+  if (!r || r.canceled) return;
+  if (r.error) { toast('Ошибка экспорта: ' + r.error); return; }
+  toast('Настройки экспортированы', { actionLabel: 'Открыть папку', action: () => lite.openInFileManager(r.dir), ttl: 8000 });
+}
+// Restore from a backup. Overwrites the current state, so confirm first; reload to apply.
+async function importSettings() {
+  closeMenus();
+  showConfirm(
+    'Импорт настроек',
+    'Импорт перезапишет текущие настройки, проекты, категории и заметки данными из файла. Открытые терминалы не затрагиваются. Продолжить?',
+    'Импортировать',
+    async () => {
+      const r = await lite.settings.import();
+      if (!r || r.canceled) return;
+      if (r.error) { toast('Ошибка импорта: ' + r.error); return; }
+      if (r.partial) {
+        const parts = [];
+        if (r.failedKeys && r.failedKeys.length) parts.push(`настройки: ${r.failedKeys.join(', ')}`);
+        if (r.failedNotes) parts.push(`заметок: ${r.failedNotes}`);
+        toast('Импорт частичный — не записано: ' + parts.join('; ') + '. Перезагружаю…', { ttl: 9000 });
+      } else {
+        toast('Настройки импортированы — перезагружаю…');
+      }
+      setTimeout(() => location.reload(), r.partial ? 1500 : 700);
+    });
+}
 function buildFileMenu(dd) {
-  dd.appendChild(menuRow('📂', 'Открыть папку', () => { closeMenus(); openProjectDialog(); }));
-  dd.appendChild(menuRow('✚', 'Создать папку…', () => { closeMenus(); showCreateFolder(); }));
+  dd.appendChild(menuRow('folder', 'Открыть папку', () => { closeMenus(); openProjectDialog(); }));
+  dd.appendChild(menuRow('plus', 'Создать папку…', () => { closeMenus(); showCreateFolder(); }));
+  dd.appendChild(el('div', 'menu-sep'));
+  dd.appendChild(menuRow('download', 'Экспорт настроек…', exportSettings));
+  dd.appendChild(menuRow('upload', 'Импорт настроек…', importSettings));
   dd.appendChild(el('div', 'menu-sep'));
   dd.appendChild(el('div', 'menu-label', 'Ранее открытые'));
   const recents = loadRecents();
@@ -1662,14 +2176,14 @@ function buildFileMenu(dd) {
   dd.appendChild(list);
   if (recents.length) {
     dd.appendChild(el('div', 'menu-sep'));
-    dd.appendChild(menuRow('🗑', 'Очистить список', () => { persist('recents', []); closeMenus(); }));
+    dd.appendChild(menuRow('trash', 'Очистить список', () => { persist('recents', []); closeMenus(); }));
   }
 }
 function buildSettingsMenu(dd) {
-  dd.appendChild(menuRow('🎚', 'Настройки…', () => { closeMenus(); showSettings(); }));
-  dd.appendChild(menuRow('⌘', 'Палитра команд (Ctrl+K)', () => { closeMenus(); showPalette(); }));
+  dd.appendChild(menuRow('sliders', 'Настройки…', () => { closeMenus(); showSettings(); }));
+  dd.appendChild(menuRow('grid', 'Палитра команд (Ctrl+K)', () => { closeMenus(); showPalette(); }));
   dd.appendChild(el('div', 'menu-sep'));
-  dd.appendChild(menuRow('🔍', 'Поиск в терминале (Ctrl+F)', () => { closeMenus(); openTermSearch(); }));
+  dd.appendChild(menuRow('search', 'Поиск в терминале (Ctrl+F)', () => { closeMenus(); openTermSearch(); }));
 }
 
 // terminal right-click menu
@@ -1678,27 +2192,36 @@ function showTermMenu(x, y, term, projId) {
   const dd = el('div', 'menu-dropdown');
   dd.style.minWidth = '160px';
   const hasSel = term.hasSelection && term.hasSelection();
-  dd.appendChild(menuRow('⧉', 'Копировать', hasSel ? () => {
+  dd.appendChild(menuRow('copy', 'Копировать', hasSel ? () => {
     closeMenus();
     lite.copyText(term.getSelection());
     if (term.clearSelection) term.clearSelection();
   } : null, hasSel ? '' : 'disabled'));
-  dd.appendChild(menuRow('📋', 'Вставить', () => { closeMenus(); pasteInto(projId); }));
+  dd.appendChild(menuRow('clipboard', 'Вставить', () => { closeMenus(); pasteInto(projId); }));
   dd.appendChild(el('div', 'menu-sep'));
-  dd.appendChild(menuRow('🧹', 'Очистить', () => { closeMenus(); clearTerminal(projId); }));
-  dd.appendChild(menuRow('⟳', 'Перезапустить', () => { closeMenus(); restartTerminal(projId); }));
+  dd.appendChild(menuRow('eraser', 'Очистить', () => { closeMenus(); clearTerminal(projId); }));
+  dd.appendChild(menuRow('refresh', 'Перезапустить', () => { closeMenus(); restartTerminal(projId); }));
   dd.addEventListener('click', (e) => e.stopPropagation());
   placeMenu(dd, x, y);
 }
 
 // ---------------------------------------------------------------- modals
-function makeModal(innerHtml) {
+// onClose runs on EVERY close path (button, Esc, overlay-click) exactly once — so
+// callers can release listeners/refs they attached (e.g. a queue's onChange) without
+// leaking when the user dismisses via Esc or backdrop instead of the explicit button.
+function makeModal(innerHtml, onClose) {
   const overlay = el('div', 'modal-overlay');
   const m = el('div', 'modal');
   m.innerHTML = innerHtml;
   overlay.appendChild(m);
   $('#modal-root').appendChild(overlay);
-  const close = () => { $('#modal-root').innerHTML = ''; };
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    $('#modal-root').innerHTML = '';
+    if (onClose) { try { onClose(); } catch (_) {} }
+  };
   overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(); });
   m.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
   return { overlay, m, close };
@@ -1731,14 +2254,21 @@ function showAbout() {
   const { m, close } = makeModal(`
     <h2><span style="color:var(--green-bright)">▍</span>LiteEditorAI</h2>
     <div class="about-desc">
-      Лёгкий редактор для работы с ИИ-агентами прямо в терминале.
-      У каждого проекта свой терминал, рядом — просмотр и правка файлов, дерево и git.
-      Открыл папку — сразу работаешь с агентом (Claude&nbsp;Code, Codex, Qwen, Kimi и&nbsp;др.).<br><br>
-      Заметки-промпты, темы, индикатор «агент ждёт ответа». Сделано на Electron.
+      Когда код всё чаще пишет агент, а не ты сам, привычный редактор встаёт с ног на голову:
+      в центре уже не файл, а разговор. LiteEditor построен вокруг этого — главный здесь
+      твой терминал с агентом, а просмотр кода, дерево и git живут рядом и прячутся одной
+      кнопкой, когда не нужны.<br><br>
+      Это нарочно лёгкий и тихий инструмент: открыл папку — и сразу за дело, без долгой
+      настройки. Он старается не мешать и держаться в стороне, пока ты направляешь работу,
+      а не выстукиваешь каждую строку руками.<br><br>
+      Маленький проект для себя и тех, кто проводит день в диалоге с ИИ и хочет, чтобы вокруг
+      этого диалога было спокойно и удобно.
     </div>
     <div class="about-ver">${APP_VERSION}</div>
+    <div class="about-meta">Максим&nbsp;Кузьминский · <a href="#" id="ab-src">исходники на GitHub</a></div>
     <div class="modal-actions"><button class="btn primary" id="ab-ok">Ок</button></div>`);
   m.querySelector('#ab-ok').onclick = close;
+  m.querySelector('#ab-src').onclick = (e) => { e.preventDefault(); lite.openExternal('https://github.com/DanielLetto2020/LiteEditorAI'); };
 }
 function showCreateFolder() {
   const { m, close } = makeModal(`
@@ -1780,6 +2310,74 @@ function showCreateFolder() {
   m.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); create(); } });
 }
 
+// ---------------------------------------------------------------- logs viewer
+// In-app reader for ~/.LiteEditorAI/logs/*.log with level highlighting. Read-only.
+// Renders lines via textContent (never innerHTML) — log text is untrusted input.
+function showLogs() {
+  closeMenus();
+  const { m } = makeModal(`
+    <h2>🗒 Логи приложения</h2>
+    <div class="logs-wrap">
+      <div class="logs-files" id="logs-files"></div>
+      <div class="logs-main">
+        <div class="logs-bar">
+          <span class="logs-name" id="logs-curname">—</span>
+          <span class="drag-space-static"></span>
+          <label class="logs-chk"><input type="checkbox" id="logs-erronly"> только ошибки</label>
+          <button class="icon-btn" id="logs-copy" title="Скопировать файл">⧉</button>
+          <button class="icon-btn" id="logs-refresh" title="Обновить">⟳</button>
+        </div>
+        <div class="logs-view" id="logs-view"></div>
+      </div>
+    </div>`);
+  const filesBox = m.querySelector('#logs-files');
+  const view = m.querySelector('#logs-view');
+  const curName = m.querySelector('#logs-curname');
+  const errOnly = m.querySelector('#logs-erronly');
+  let current = null, raw = '';
+  const fmtSize = (n) => n < 1024 ? n + ' B' : n < 1048576 ? Math.round(n / 1024) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+  const levelOf = (line) => /\[(FATAL|ERROR)\]/.test(line) ? 'err' : /\[WARN\]/.test(line) ? 'warn' : /\[INFO\]/.test(line) ? 'info' : null;
+  function render() {
+    view.innerHTML = '';
+    if (!current) { view.appendChild(el('div', 'logs-empty', 'Выбери файл слева')); return; }
+    let lines = raw.split('\n');
+    if (errOnly.checked) lines = lines.filter((l) => { const k = levelOf(l); return k === 'err' || k === 'warn'; });
+    const MAXL = 2500;
+    if (lines.length > MAXL) { view.appendChild(el('div', 'logs-note', `…последние ${MAXL} строк из ${lines.length}`)); lines = lines.slice(-MAXL); }
+    if (!lines.length) { view.appendChild(el('div', 'logs-empty', errOnly.checked ? 'Ошибок и предупреждений нет 🎉' : 'Файл пуст')); return; }
+    const frag = document.createDocumentFragment();
+    for (const line of lines) { const k = levelOf(line); frag.appendChild(el('div', 'logs-line' + (k ? ' ll-' + k : ''), line || ' ')); }
+    view.appendChild(frag);
+  }
+  async function load(name) {
+    current = name; curName.textContent = name;
+    filesBox.querySelectorAll('.logs-file').forEach((r) => r.classList.toggle('active', r.dataset.name === name));
+    view.innerHTML = ''; view.appendChild(el('div', 'logs-empty', 'Загрузка…'));
+    let res; try { res = await lite.logs.read(name); } catch (e) { res = { error: String(e) }; }
+    if (!res || res.error) { view.innerHTML = ''; view.appendChild(el('div', 'logs-empty', 'Ошибка: ' + ((res && res.error) || '—'))); return; }
+    raw = (res.truncated ? '…(показан конец файла)\n' : '') + (res.content || '');
+    render();
+  }
+  async function refresh() {
+    filesBox.innerHTML = '';
+    let res; try { res = await lite.logs.list(); } catch (e) { res = { error: String(e), files: [] }; }
+    const files = (res && res.files) || [];
+    if (!files.length) { filesBox.appendChild(el('div', 'logs-empty', 'Логов пока нет')); view.innerHTML = ''; return; }
+    for (const f of files) {
+      const row = el('div', 'logs-file'); row.dataset.name = f.name;
+      row.appendChild(el('div', 'logs-fname', f.name));
+      row.appendChild(el('div', 'logs-fmeta', fmtSize(f.size)));
+      row.addEventListener('click', () => load(f.name));
+      filesBox.appendChild(row);
+    }
+    load((current && files.some((f) => f.name === current)) ? current : files[0].name); // newest day first
+  }
+  errOnly.onchange = render;
+  m.querySelector('#logs-refresh').onclick = refresh;
+  m.querySelector('#logs-copy').onclick = () => { if (raw) { lite.copyText(raw); toast('Лог скопирован в буфер'); } };
+  refresh();
+}
+
 // ---------------------------------------------------------------- settings panel (small on purpose)
 function showSettings() {
   const { m, close } = makeModal(`
@@ -1805,7 +2403,7 @@ function showSettings() {
   const font = m.querySelector('#st-font'); font.value = settings.fontSize;
   const themeSel = m.querySelector('#st-theme');
   for (const [key, t] of Object.entries(THEMES)) { const o = document.createElement('option'); o.value = key; o.textContent = t.label; themeSel.appendChild(o); }
-  themeSel.value = THEMES[settings.theme] ? settings.theme : 'emerald';
+  themeSel.value = THEMES[settings.theme] ? settings.theme : DEFAULT_THEME;
   themeSel.addEventListener('change', () => { settings.theme = themeSel.value; saveSettings(); applyTheme(); }); // live preview
   const wd = m.querySelector('#st-wd'); wd.value = settings.workingDir || '';
   let scan = [...(settings.scanDirs || [])];
@@ -1922,6 +2520,8 @@ function toggleSingle() {
 
 // ---------------------------------------------------------------- init
 function init() {
+  hydrateIcons(); // fill the static [data-icon] buttons (titlebar / pane toolbars) with SVG
+  { const av = $('#app-ver'); if (av) av.textContent = APP_VERSION; } // version label in the titlebar
   makeEditor();
   applyLayout();
   applyTheme();
@@ -1972,7 +2572,6 @@ function init() {
     }, 120);
   });
 
-  $('#open-folder-btn').addEventListener('click', openProjectDialog);
   $('#btn-single').addEventListener('click', toggleSingle);
   $('#btn-scratch').addEventListener('click', toggleScratch);
   $('#scratch-restart').addEventListener('click', restartScratch);
@@ -1992,8 +2591,9 @@ function init() {
   $('#term-clear').addEventListener('click', () => clearTerminal());
   $('#term-restart').addEventListener('click', () => restartTerminal());
   $('#attention-badge').addEventListener('click', () => {
-    const id = [...projState.entries()].find(([, s]) => s === 'waiting');
-    if (id) setActive(id[0]);
+    const e = [...projState.entries()].find(([, s]) => s === 'waiting');
+    const rec = e && terms.get(e[0]);
+    if (rec) { setActive(rec.projId); switchTab(e[0]); }
   });
 
   // terminal search box
@@ -2039,6 +2639,12 @@ function init() {
   renderProjects();
   if (projects.length) setActive(projects[0].id);
   else showActiveTerminal();
+
+  // Restore which panes were open last time (viewer / system terminal). grow:false —
+  // the saved window width already includes them, so reveal in place without resizing.
+  const ui = STORE.uiState || {};
+  if (ui.viewerOpen) setViewerOpen(true, { grow: false });
+  if (ui.scratchOpen) setScratchOpen(true, { grow: false });
 
   scanProjects();          // add subfolders of settings.scanDirs (non-blocking)
   checkProjectsExistence();
