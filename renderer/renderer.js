@@ -10,40 +10,26 @@ import { CanvasAddon } from '@xterm/addon-canvas';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
 
-import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection, Decoration, gutter, GutterMarker } from '@codemirror/view';
-import { EditorState, Compartment, StateField, StateEffect, RangeSet } from '@codemirror/state';
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
-import { syntaxHighlighting, defaultHighlightStyle, indentOnInput, bracketMatching } from '@codemirror/language';
-import { search, searchKeymap, highlightSelectionMatches, openSearchPanel } from '@codemirror/search';
-import { oneDark } from '@codemirror/theme-one-dark';
-import { marked } from 'marked';
-import { javascript } from '@codemirror/lang-javascript';
-import { python } from '@codemirror/lang-python';
-import { json } from '@codemirror/lang-json';
-import { markdown } from '@codemirror/lang-markdown';
-import { html } from '@codemirror/lang-html';
-import { css } from '@codemirror/lang-css';
-import { sql, PostgreSQL, MySQL, SQLite } from '@codemirror/lang-sql';
-import { showMinimap } from '@replit/codemirror-minimap';
-import { initTextProc } from './modules/textproc.js';
-import { el, svgEl, icon, iconBtn, hydrateIcons, toast, renderDiffInto, makeModal, showConfirm, showPrompt, baseName, ICONS, setErrorSink } from './ui.js';
-import { initGit } from './modules/git.js';
-import { initCtx } from './modules/contextgraph.js';
-import { initContainers } from './modules/containers.js';
-import { initDb } from './modules/db.js';
-import { initRh } from './modules/remotehost.js';
-import { initNotes } from './modules/notes.js';
-import { initAudit } from './modules/audit.js';
-import { initIterflow } from './modules/iterflow.js';
-import { initSeo } from './modules/seo.js';
-import { initTools } from './modules/tools.js';
-import { initOpenRouter } from './modules/openrouter.js';
+// CodeMirror/marked/showMinimap/codeedit — переехали в окно вивера (renderer/modules/files.js).
+// В ядре остались только терминал (xterm) + темы/термутилы.
+import { THEMES, TERM_THEME, DEFAULT_THEME } from './themes.js';
+import { loadFastRenderer, applyUnicode11, copySelection } from './termutil.js';
+// initTextProc — «Обработка текста» мигрирована в отдельное окно (renderer/module-entry.js).
+import { el, svgEl, icon, iconBtn, hydrateIcons, toast, makeModal, showConfirm, showPrompt, baseName, ICONS, setErrorSink, applyLayoutSwap } from './ui.js';
+// initGit — модуль «Git» мигрирован в отдельное окно (renderer/module-entry.js).
+// initCtx — модуль «Контекст» мигрирован в отдельное окно (renderer/module-entry.js).
+// initContainers — модуль «Контейнеры» мигрирован в отдельное окно (renderer/module-entry.js).
+// initDb — модуль «Базы данных» мигрирован в отдельное окно (renderer/module-entry.js).
+// initRh — модуль «Удалённые хосты» мигрирован в отдельное окно (renderer/module-entry.js).
+// initNotes / initAudit / initSeo / initTools / initIterflow — модули мигрированы в отдельные окна (renderer/module-entry.js).
+// initOpenRouter — чат мигрирован в отдельное окно (renderer/module-entry.js).
 import { initExtensions } from './modules/extensions.js';
+// initFiles — вивер+дерево мигрированы в отдельное окно (renderer/module-entry.js).
 
-const APP_VERSION = 'alpha v1.0.200';
+const APP_VERSION = 'alpha v1.1.14';
 const GUTTER = 5;
-const SCRATCH_ID = '__scratch__'; // префикс id системных терминалов (домашняя папка), не привязаны к проектам
-const isScratch = (id) => typeof id === 'string' && id.startsWith(SCRATCH_ID);
+// Системный терминал («Система · ~») мигрирован в отдельное окно (renderer/modules/scratch.js):
+// его id `__scratch__::tN` маршрутизируются main'ом в окно-владельца, в ядре их больше не обрабатываем.
 
 const lite = window.lite;
 const $ = (sel) => document.querySelector(sel);
@@ -80,78 +66,25 @@ const tabsByProj = new Map();     // projId -> { sessions: [sessionId...], activ
 let sessionSeq = 0;
 const projState = new Map(); // sessionId -> 'quiet' | 'busy' | 'waiting'
 const missing = new Set();   // ids of projects whose folder no longer exists on disk
-const expandedDirs = new Set(); // tree dir paths currently expanded (survives live refresh)
-let gitFiles = {};           // active project: abs path -> git short status code
+// Состояние вивера+дерева (expandedDirs/gitFiles/currentFile/dirty/…) живёт в отдельном ОКНЕ —
+// renderer/modules/files.js (initFiles) + module-entry.js. Ядро его не держит (см. WINDOW_MODULES).
 
-// ---------------------------------------------------------------- OpenRouter chat state
-let activeOrId = null;        // id of the OpenRouter card whose chat is shown (null → terminal mode)
-const Or = initOpenRouter({
-  STORE, persist, settings, isCollapsed, setCollapsed, guardDirty,
-  renderProjects, showActiveTerminal, refreshViewerForActive,
-  closeMenus: () => closeMenus(),   // модалка ключей закрывает открытые дропдауны ядра
-  isViewerOpen: () => viewerOpen, getActiveOrId: () => activeOrId,
-  setActiveOrId: (v) => { activeOrId = v; }, clearActiveDoc: () => { activeDocId = null; },
-  // чат закрывает проектные модули правого слота; rh исторически не трогает (1:1)
-  closePanelsForChat: () => { if (Git.isOpen()) Git.setOpen(false); if (Containers.isOpen()) Containers.setOpen(false); if (Db.isOpen()) Db.setOpen(false); if (Notes.isOpen()) Notes.setOpen(false); if (Audit.isOpen()) Audit.setOpen(false); if (Iterflow.isOpen()) Iterflow.setOpen(false); if (Seo.isOpen()) Seo.setOpen(false); if (scratchOpen) setScratchOpen(false); },
-});
-// ---------------------------------------------------------------- Text processing (изолированный модуль)
-// Документ-плашка открывается ВМЕСТО терминала (как чат OpenRouter). Вся логика — в
-// renderer/textproc.js; связь только через host-контракт (см. модуль). activeDocId ≠ null
-// → центральная зона показывает документ. Mutually exclusive с чатом и терминалом.
-let activeDocId = null;
-const TextProc = initTextProc({
-  el, icon, iconBtn, makeModal, showConfirm, showPrompt, toast,
-  STORE, persist, settings, saveSettings, isCollapsed, setCollapsed,
-  activate: (id) => guardDirty(() => { activeOrId = null; activeDocId = id; renderProjects(); showActiveTerminal(); }),
-  isActive: (id) => activeDocId === id,
-  deactivate: () => { activeDocId = null; renderProjects(); showActiveTerminal(); },
-  refresh: () => renderProjects(),
-});
+// OpenRouter (чат) и «Обработка текста» — панели правого слота. Их инициализация и регистрация
+// в реестре панелей — ниже, вместе с git/audit/… (нужны layout/GUTTER/closeOtherPanels, объявленные
+// после этого места). Сами модули держат своё внутреннее состояние (активный ключ/документ).
 
-let viewerOpen = false;
-let scratchOpen = false;     // системный терминал справа открыт
-const scratchTerms = new Map(); // scratchId -> { term, fit, search, container, name }
-let scratchSessions = [];        // ordered scratch ids (tabs)
-let scratchActiveId = null;
-let scratchSeq = 0;
 // Терминалы dev-папок пользовательских модулей: живут ВНУТРИ панели «Модули» (#ext-pane),
 // не в области проектов и не среди скретч-вкладок. cwd = папка модуля.
 const EXT_TERM_ID = '__extterm__';
 const isExtTerm = (id) => typeof id === 'string' && id.startsWith(EXT_TERM_ID);
 const extTerms = new Map(); // ptyId -> { term, fit, search, container }
 let extTermSeq = 0;
-// RemoteHost-модуль (SSH-сессии к серверам): список профилей + живые сессии-вкладки
-let currentFile = null;
-let dirty = false;
-let diffMode = false;        // viewer showing a git diff instead of the file
-let previewMode = false;     // viewer showing a rendered preview (md/image/html) instead of source
-let editor = null;
-let loadingDoc = false;
-const langComp = new Compartment();
 
-const DEFAULT_LAYOUT = { sidebar: 240, viewer: 520, tree: 240, scratch: 420, git: 360, ctx: 740, docker: 460, db: 560, rh: 520, ext: 420, notes: 480, audit: 460, iterflow: 480, seo: 480, tools: 560 };
+const DEFAULT_LAYOUT = { sidebar: 240, viewer: 520, tree: 240, scratch: 420, git: 360, ctx: 740, docker: 460, db: 560, rh: 520, ext: 420, notes: 480, audit: 460, iterflow: 480, seo: 480, tools: 560, chat: 600, doc: 640 };
 let layout = loadLayout();
 let lastParent = STORE.lastParent || '';
 
-const TERM_THEME = {
-  background: '#0d1116', foreground: '#cdd6e0', cursor: '#34d399',
-  selectionBackground: '#1f3a4d',
-  black: '#0d1116', red: '#f7768e', green: '#9ece6a', yellow: '#e0af68',
-  blue: '#7aa2f7', magenta: '#bb9af7', cyan: '#7dcfff', white: '#a9b1d6',
-};
-// ---------------------------------------------------------------- themes (a curated few)
-// Theme registry. The CSS does the heavy lifting via body[data-theme] (token contract
-// in styles.css); here we carry the human label + per-theme terminal (xterm) colours.
-// To add a theme: add a block in styles.css AND an entry here. Default = neumorphism.
-const DEFAULT_THEME = 'neumorphism';
-const THEMES = {
-  neumorphism: { label: 'Неоморфизм', term: { background: '#161a20', foreground: '#cfd4db', cursor: '#34d399', selectionBackground: '#1f3a30' } },
-  glass:       { label: 'Стекло',     term: { background: '#0b0f16', foreground: '#dbe5ee', cursor: '#5eead4', selectionBackground: '#13443c' } },
-  material:    { label: 'Material',   term: { background: '#121212', foreground: '#e0e0e0', cursor: '#26a69a', selectionBackground: '#004d40' } },
-  catppuccin:  { label: 'Catppuccin', term: { background: '#181825', foreground: '#cdd6f4', cursor: '#a6e3a1', selectionBackground: '#333b54' } },
-  gruvbox:     { label: 'Gruvbox',    term: { background: '#282828', foreground: '#ebdbb2', cursor: '#fabd2f', selectionBackground: '#504945' } },
-  aurora:      { label: 'Aurora',     term: { background: '#0a0f14', foreground: '#dbe7f0', cursor: '#2dd4bf', selectionBackground: '#0f4a44' } },
-};
+// TERM_THEME/THEMES/DEFAULT_THEME вынесены в renderer/themes.js (общий реестр редактора и окон модулей).
 function termTheme() {
   const t = THEMES[settings.theme] || THEMES[DEFAULT_THEME];
   return { ...TERM_THEME, ...t.term };
@@ -160,10 +93,9 @@ function applyTheme() {
   const name = THEMES[settings.theme] ? settings.theme : DEFAULT_THEME;
   document.body.dataset.theme = name; // always set; index.html ships data-theme too so there's no flash
   for (const rec of terms.values()) { try { rec.term.options.theme = termTheme(); } catch (_) {} }
-  for (const rec of scratchTerms.values()) { try { rec.term.options.theme = termTheme(); } catch (_) {} }
   for (const rec of extTerms.values()) { try { rec.term.options.theme = termTheme(); } catch (_) {} }
-  Containers.applyTermTheme(); // exec-терминал контейнера красится тем же termTheme
   try { Ext.notifyTheme(name); } catch (_) {} // пользовательские модули: ctx.theme.onChange
+  try { lite.app.settingsChanged(settings); } catch (_) {} // окна модулей: применить тему/настройки
 }
 
 const activeProject = () => projects.find((p) => p.id === activeId);
@@ -175,23 +107,11 @@ function loadLayout() { return { ...DEFAULT_LAYOUT, ...(STORE.layout || {}) }; }
 function saveLayout() { persist('layout', layout); }
 // Whether the viewer / system terminal panes are open — part of the backed-up state,
 // restored on startup (and on import) so the window reopens the way it was left.
-function saveUiState() { persist('uiState', { viewerOpen, scratchOpen, gitOpen: Git.isOpen(), ctxOpen: Ctx.isOpen(), dockerOpen: Containers.isOpen(), dbOpen: Db.isOpen(), rhOpen: Rh.isOpen(), notesOpen: Notes.isOpen(), auditOpen: Audit.isOpen(), iterflowOpen: Iterflow.isOpen(), seoOpen: Seo.isOpen(), toolsOpen: Tools.isOpen() }); }
+function saveUiState() { persist('uiState', {}); } // вивер теперь окно; набор открытых окон помнит main (moduleWins.__open)
 function applyLayout() {
   $('#sidebar').style.flexBasis = layout.sidebar + 'px';
-  $('#viewer-pane').style.flexBasis = layout.viewer + 'px';
-  $('#tree-pane').style.flexBasis = layout.tree + 'px';
-  $('#scratch-pane').style.flexBasis = layout.scratch + 'px';
-  $('#git-pane').style.flexBasis = layout.git + 'px';
-  $('#ctx-pane').style.flexBasis = layout.ctx + 'px';
-  $('#docker-pane').style.flexBasis = layout.docker + 'px';
-  $('#db-pane').style.flexBasis = layout.db + 'px';
-  $('#rh-pane').style.flexBasis = layout.rh + 'px';
+  // вивер/дерево живут в своём окне — в редакторе этих панелей больше нет.
   $('#ext-pane').style.flexBasis = layout.ext + 'px';
-  $('#notes-pane').style.flexBasis = layout.notes + 'px';
-  $('#audit-pane').style.flexBasis = layout.audit + 'px';
-  $('#iterflow-pane').style.flexBasis = layout.iterflow + 'px';
-  $('#seo-pane').style.flexBasis = layout.seo + 'px';
-  $('#tools-pane').style.flexBasis = layout.tools + 'px';
 }
 function loadRecents() { return Array.isArray(STORE.recents) ? STORE.recents : []; }
 function pushRecent(p) {
@@ -259,8 +179,8 @@ function renderProjects() {
   box.innerHTML = '';
   const sections = buildSections();
   sections.forEach((s, i) => box.appendChild(renderSection(s, i, sections)));
-  box.appendChild(Or.renderSection()); // always shown (even with 0 keys) — own «интеграции» strip
-  box.appendChild(TextProc.renderSection()); // «Обработка текста» — изолированный модуль
+  // OpenRouter (ключи) и «Обработка текста» (документы) больше НЕ в сайдбаре — их списки живут
+  // вкладками внутри своих панелей правого слота (открываются через квикбар/меню «Модули»).
   renderMiniRail();
 }
 // OpenRouter section — fixed group (no reorder arrows), like a special category.
@@ -306,7 +226,7 @@ function renderSection(s, index, sections) {
 function makeCard(p) {
   const card = el('div', 'card');
   card.dataset.id = p.id;
-  if (p.id === activeId && activeOrId === null) card.classList.add('active');
+  if (p.id === activeId) card.classList.add('active');
   if (missing.has(p.id)) card.classList.add('missing');
   if (p.accent) { card.classList.add('accented'); card.style.setProperty('--card-accent', p.accent); } // весь бордер + усиленная левая полоса
 
@@ -338,12 +258,8 @@ function makeCard(p) {
   card.addEventListener('contextmenu', (e) => { e.preventDefault(); showCardMenu(e.clientX, e.clientY, p); });
   return card;
 }
-// Switch from chat mode back to a project's terminal (or just select the project).
+// Клик по карточке проекта → выбрать его (чат/документ теперь живут отдельной панелью справа).
 function focusProject(id) {
-  if (activeOrId !== null) {
-    activeOrId = null;
-    if (id === activeId) { renderProjects(); showActiveTerminal(); if (viewerOpen) refreshViewerForActive(); return; }
-  }
   setActive(id);
 }
 
@@ -741,48 +657,12 @@ async function scanProjects() {
 }
 
 // ---------------------------------------------------------------- keyboard layout swap
-// Fix text typed in the wrong layout (e.g. "ghbdtn" → "привет") by physical key
-// position. Direction is auto-detected from which alphabet dominates the text.
-const US_RU_BASE = {
-  '`': 'ё', q: 'й', w: 'ц', e: 'у', r: 'к', t: 'е', y: 'н', u: 'г', i: 'ш', o: 'щ', p: 'з', '[': 'х', ']': 'ъ',
-  a: 'ф', s: 'ы', d: 'в', f: 'а', g: 'п', h: 'р', j: 'о', k: 'л', l: 'д', ';': 'ж', "'": 'э',
-  z: 'я', x: 'ч', c: 'с', v: 'м', b: 'и', n: 'т', m: 'ь', ',': 'б', '.': 'ю', '/': '.',
-};
-const US_RU = {};
-for (const [k, v] of Object.entries(US_RU_BASE)) {
-  US_RU[k] = v;
-  if (/[a-z]/.test(k)) US_RU[k.toUpperCase()] = v.toUpperCase();
-}
-Object.assign(US_RU, { '{': 'Х', '}': 'Ъ', ':': 'Ж', '"': 'Э', '<': 'Б', '>': 'Ю' }); // shifted punctuation keys
-const RU_US = {};
-for (const [k, v] of Object.entries(US_RU)) if (!(v in RU_US)) RU_US[v] = k;
-
-function convertLayout(text) {
-  let lat = 0, cyr = 0;
-  for (const ch of text) { if (/[a-z]/i.test(ch)) lat++; else if (/[а-яё]/i.test(ch)) cyr++; }
-  const map = lat >= cyr ? US_RU : RU_US;
-  let out = '';
-  for (const ch of text) out += (map[ch] || ch);
-  return out;
-}
-function applyLayoutSwap(ta) {
-  const s = ta.selectionStart, e = ta.selectionEnd;
-  if (s !== e) { // convert only the selection if there is one
-    ta.value = ta.value.slice(0, s) + convertLayout(ta.value.slice(s, e)) + ta.value.slice(e);
-    ta.setSelectionRange(s, e);
-  } else {
-    ta.value = convertLayout(ta.value);
-  }
-  ta.focus();
-}
+// convertLayout/applyLayoutSwap (фиксер раскладки «ghbdtn»→«привет») вынесены в ui.js —
+// общий хелпер для редактора и окон модулей (импорт ниже).
 
 // ---------------------------------------------------------------- notes / prompt cards (#4)
-// Вынесены в renderer/modules/notes.js (const Notes ниже); здесь — только sendNoteToTerminal.
-const Notes = initNotes({
-  STORE, settings, saveSettings, applyLayoutSwap, sendNoteToTerminal,
-  layout, GUTTER, saveUiState, refitActiveTerminal, activeProject, closeOtherPanels,
-  getProjects: () => projects.map((p) => ({ id: p.id, name: p.name, path: p.path })),
-});
+// Модуль «Задачи» (notes) мигрирован в отдельное окно (renderer/module-entry.js, проектозависимый).
+// Здесь остаётся только sendNoteToTerminal — его зовёт редактор по editorBus (окно→редактор).
 function sendNoteToTerminal(p, text) {
   if (!text) return;
   const proj = projects.find((x) => x.id === p.id);
@@ -840,7 +720,7 @@ function closeProject(id) {
 function doCloseProject(id) {
   // Closing the project whose unsaved file is open in the viewer would silently drop those
   // edits — run the save/discard prompt first, then re-enter (dirty is false → falls through).
-  if (dirty && currentFile && activeId === id) { guardDirty(() => doCloseProject(id)); return; }
+  // Несохранённые правки вивера теперь защищает само окно вивера (guardDirty при смене проекта).
   const closing = projects.find((p) => p.id === id);
   if (closing) { // remember the close so a scan-dir project doesn't reappear next launch
     const dis = new Set(STORE.dismissed || []); dis.add(closing.path); persist('dismissed', [...dis]);
@@ -863,7 +743,7 @@ function doCloseProject(id) {
   if (activeId === id) {
     activeId = null;
     if (projects.length) setActive(projects[0].id);
-    else { if (viewerOpen) setViewerOpen(false); renderProjects(); showActiveTerminal(); }
+    else { renderProjects(); showActiveTerminal(); } // нет проектов → окно вивера отреагирует на app:activeProject=null
   } else {
     renderProjects();
   }
@@ -994,43 +874,13 @@ async function openFromTerminal(projPath, raw) {
   let p = mm[1]; const line = mm[2] ? parseInt(mm[2], 10) : 0;
   if (!/^([a-zA-Z]:[\\/]|[\\/])/.test(p)) p = projPath.replace(/[\\/]$/, '') + '/' + p.replace(/^\.[\\/]/, '');
   if (!(await lite.fs.exists(p))) return;
-  if (!viewerOpen) await setViewerOpen(true); // дождаться renderTree+clearViewer, иначе clearViewer затрёт свежий файл
-  await openFile(p, line);
+  lite.editorBus.openInViewer(p, line); // main откроет окно вивера (если надо) и покажет файл
 }
 
 // True only for a real GPU — software WebGL (SwiftShader/llvmpipe) is slower than
 // Canvas and stalls, so route those to the Canvas renderer instead.
-function isHardwareWebgl() {
-  try {
-    const gl = document.createElement('canvas').getContext('webgl2') || document.createElement('canvas').getContext('webgl');
-    if (!gl) return false;
-    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
-    const r = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '';
-    return !/swiftshader|llvmpipe|software|mesa offscreen/i.test(r);
-  } catch (_) { return false; }
-}
-// Fast xterm renderer: WebGL on real GPU (smooth scroll), else Canvas. Both beat
-// the default DOM renderer. On WebGL context loss → fall back to Canvas.
-function loadFastRenderer(term) {
-  if (isHardwareWebgl()) {
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        try { webgl.dispose(); } catch (_) {}
-        try { term.loadAddon(new CanvasAddon()); } catch (_) {}
-      });
-      term.loadAddon(webgl);
-      return;
-    } catch (_) {}
-  }
-  try { term.loadAddon(new CanvasAddon()); } catch (_) {}
-}
-// xterm ships Unicode V6 width tables, which lack newer emoji ranges (📁 U+1F4C1, ⏰ U+23F0…)
-// → they're treated as width 1 and overlap neighbouring text (e.g. Claude Code's status line).
-// The unicode11 addon adds the Unicode 11 width tables; activeVersion='11' switches to them.
-function applyUnicode11(term) {
-  try { term.loadAddon(new Unicode11Addon()); term.unicode.activeVersion = '11'; } catch (_) {}
-}
+// isHardwareWebgl/loadFastRenderer/applyUnicode11/copySelection вынесены в renderer/termutil.js
+// (общие xterm-хелперы редактора и окон модулей; импорт у блока импортов).
 
 // ---- terminal sessions (tabs) ----
 // Each project owns ≥1 SESSION (tab) = its own PTY + xterm. `terms` is keyed by sessionId;
@@ -1097,9 +947,29 @@ function createSession(proj, name) {
   terms.set(id, rec);
   tabsByProj.get(proj.id).sessions.push(id);
   // «Контекст»: тихая автосборка — новая сессия агента должна найти готовый CLAUDE.md/AGENTS.md,
-  // если файла-выхода ещё нет (try — Ctx создаётся позже по коду).
-  try { Ctx.autoApply(proj); } catch (_) {}
+  // если файла-выхода ещё нет. Логика бэкенд-only (lite.ctx.*), поэтому живёт в ядре, а не в окне ctx
+  // (окно ctx, если открыто, освежится по своему watch выходных файлов).
+  try { ctxAutoApply(proj); } catch (_) {}
   return id;
+}
+// Тихая автосборка контекста для проекта (порт из contextgraph.js: только бэкенд-вызовы, без UI).
+// Компилирует CLAUDE.md/AGENTS.md, ТОЛЬКО если файла-выхода ещё нет и автосборка не выключена в графе.
+const CTX_AGENTS = ['claude', 'codex'];
+const CTX_OUT_FILES = { claude: 'CLAUDE.md', codex: 'AGENTS.md' };
+async function ctxAutoApply(p) {
+  try {
+    for (const ag of CTX_AGENTS) {
+      const prof = await lite.ctx.profiles(p.id, ag);
+      const r0 = await lite.ctx.load(p.id, ag, prof && prof.active);
+      const g = r0 && r0.graph;
+      if (!g || (g.settings && g.settings.autoApply === false)) continue;
+      if (!(g.nodes || []).some((n) => n.type === 'text')) continue;
+      const o = (g.nodes || []).find((n) => n.type === 'out' && n.out === ag);
+      if (!o || !o.enabled) continue;
+      if (await lite.fs.exists(p.path + '/' + CTX_OUT_FILES[ag])) continue;
+      await lite.ctx.compile({ projId: p.id, projPath: p.path, agent: ag, profileId: prof && prof.active });
+    }
+  } catch (_) {}
 }
 // Ensure a project's sessions exist (restoring saved tab names on first open).
 function ensureProjectTabs(proj) {
@@ -1179,33 +1049,13 @@ async function pasteInto(id) {
   if (text) lite.pty.write(id, text);
   // Reading the clipboard is async (IPC round-trip) and the right-click menu steals
   // focus — without this the terminal looks "frozen" until clicked. Refocus the xterm.
-  const rec = scratchTerms.get(id) || terms.get(id);
+  const rec = terms.get(id);
   if (rec && rec.term) { try { rec.term.focus(); } catch (_) {} }
 }
 // Smart Ctrl+C: if there's a non-empty selection, copy it (and clear, so the next
 // Ctrl+C can still send SIGINT) and report handled; otherwise return false so the
 // keypress falls through to the PTY as the interrupt signal. Mirrors the menu's copy.
-function copySelection(term) {
-  if (term.hasSelection && term.hasSelection()) {
-    const sel = term.getSelection();
-    if (sel) { lite.copyText(sel); if (term.clearSelection) term.clearSelection(); return true; }
-  }
-  return false;
-}
-
 function showActiveTerminal() {
-  const docMode = activeDocId !== null;            // документ «Обработки текста»
-  const chatMode = !docMode && activeOrId !== null; // чат OpenRouter
-  TextProc.sync(docMode ? activeDocId : null);      // показать/спрятать (и сохранить) документ
-  $('#doc-pane').classList.toggle('hidden', !docMode);
-  $('#chat-pane').classList.toggle('hidden', !chatMode);
-  $('#terminals').style.display = (docMode || chatMode) ? 'none' : '';
-  if (docMode || chatMode) { // документ/чат заменяют терминал; прячем вкладки/терминалы/подсказку
-    $('#empty-hint').style.display = 'none';
-    $('#term-header').style.display = 'none';
-    reportRemoteActive(null);
-    return;
-  }
   const asid = activeSessionId();
   $('#empty-hint').style.display = activeId ? 'none' : 'flex';
   for (const [sid, rec] of terms) rec.container.style.display = sid === asid ? 'block' : 'none';
@@ -1286,7 +1136,6 @@ function handleRemoteClose(sid) {
   closeTab(sid);
 }
 function refitActiveTerminal(focusIt) {
-  Containers.refitExec(); // exec-терминал контейнера тоже подгоняется под новый размер
   try { Ext.refitTerminal(); } catch (_) {} // dev-терминал модуля в #ext-pane
   const asid = activeSessionId();
   const rec = asid ? terms.get(asid) : null;
@@ -1296,12 +1145,10 @@ function refitActiveTerminal(focusIt) {
   });
 }
 function clearTerminal(id) {
-  if (isScratch(id)) { const r = scratchTerms.get(id) || scratchTerms.get(scratchActiveId); if (r) { try { r.term.clear(); } catch (_) {} r.term.focus(); } return; }
   const sid = (id && terms.has(id)) ? id : activeSessionId();
   const rec = terms.get(sid); if (rec) { try { rec.term.clear(); } catch (_) {} rec.term.focus(); }
 }
 function restartTerminal(id) {
-  if (isScratch(id)) { restartScratch(id); return; }
   const sid = (id && terms.has(id)) ? id : activeSessionId();
   const rec = terms.get(sid);
   const proj = rec && projects.find((p) => p.id === rec.projId);
@@ -1314,122 +1161,6 @@ function restartTerminal(id) {
   rec.term.focus();
 }
 
-// ---------------------------------------------------------------- system terminals (module)
-// System terminals aren't tied to any project (cwd = home dir; main falls back to os.homedir()
-// when no cwd is given). Now a right-slot MODULE with its own TABS — several independent shells.
-// PTY ids are `__scratch__::tN`.
-function newScratchId() { return SCRATCH_ID + '::t' + (++scratchSeq); }
-function createScratchSession(name) {
-  const id = newScratchId();
-  const container = el('div', 'term-instance');
-  $('#scratch-term').appendChild(container);
-  const term = new Terminal({
-    fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace',
-    fontSize: settings.fontSize, cursorBlink: true, allowProposedApi: true, theme: termTheme(), scrollback: 5000,
-  });
-  const fit = new FitAddon();
-  const search = new SearchAddon();
-  term.loadAddon(fit);
-  term.loadAddon(search);
-  term.loadAddon(new WebLinksAddon((_e, uri) => lite.openExternal(uri)));
-  applyUnicode11(term);
-  term.open(container);
-  loadFastRenderer(term);
-  fit.fit();
-  lite.pty.create({ id, cols: term.cols, rows: term.rows }); // no cwd → ~ (os.homedir)
-  term.onData((data) => lite.pty.write(id, data));
-  term.onResize(({ cols, rows }) => lite.pty.resize(id, cols, rows));
-  term.attachCustomKeyEventHandler((e) => {
-    if (e.type !== 'keydown') return true;
-    if (e.ctrlKey && e.shiftKey && e.code === 'KeyT') { addScratchTab(); return false; }
-    if (e.ctrlKey && e.shiftKey && e.code === 'KeyW') { closeScratchTab(scratchActiveId); return false; }
-    if (e.ctrlKey && (e.key === 'PageDown' || e.key === 'PageUp')) { cycleScratchTab(e.key === 'PageDown' ? 1 : -1); return false; }
-    // match by physical key so copy/paste work in any layout (Russian incl.)
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyC') return !copySelection(term); // copied → swallow; else SIGINT
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyV') { e.preventDefault(); pasteInto(id); return false; }
-    // Ctrl+Enter — перенос строки в вводе (продолжение команды): \ + CR для bash/zsh, LF для ConPTY/PSReadLine (Win)
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'Enter') { lite.pty.write(id, lite.platform === 'win32' ? '\n' : '\\\r'); return false; }
-    return true;
-  });
-  container.addEventListener('contextmenu', (e) => { e.preventDefault(); showTermMenu(e.clientX, e.clientY, term, id); });
-  scratchTerms.set(id, { term, fit, search, container, name: name || ('Терминал ' + (scratchSessions.length + 1)) });
-  scratchSessions.push(id);
-  return id;
-}
-function ensureScratch() { if (!scratchSessions.length) scratchActiveId = createScratchSession('Терминал 1'); }
-function showActiveScratch() {
-  for (const [sid, rec] of scratchTerms) rec.container.style.display = sid === scratchActiveId ? 'block' : 'none';
-  renderScratchTabs();
-  refitScratch(true);
-}
-function renderScratchTabs() {
-  const bar = $('#scratch-tabs'); if (!bar) return;
-  bar.innerHTML = '';
-  scratchSessions.forEach((sid) => {
-    const rec = scratchTerms.get(sid); if (!rec) return;
-    const tab = el('div', 'tab' + (sid === scratchActiveId ? ' active' : ''));
-    tab.appendChild(el('span', 'tab-name', rec.name));
-    if (scratchSessions.length > 1) {
-      const x = iconBtn('tab-close', 'x', 'Закрыть вкладку (Ctrl+Shift+W)', 12);
-      x.addEventListener('click', (e) => { e.stopPropagation(); closeScratchTab(sid); });
-      tab.appendChild(x);
-    }
-    tab.addEventListener('click', () => switchScratchTab(sid));
-    tab.addEventListener('dblclick', () => renameScratchTab(sid));
-    bar.appendChild(tab);
-  });
-  const add = iconBtn('tab-add', 'plus', 'Новый системный терминал (Ctrl+Shift+T)', 15);
-  add.addEventListener('click', () => addScratchTab());
-  bar.appendChild(add);
-}
-function switchScratchTab(sid) { if (!scratchTerms.has(sid)) return; scratchActiveId = sid; showActiveScratch(); }
-function addScratchTab() { scratchActiveId = createScratchSession('Терминал ' + (scratchSessions.length + 1)); showActiveScratch(); }
-function closeScratchTab(sid) {
-  if (scratchSessions.length <= 1) return; // keep ≥1
-  lite.pty.kill(sid);
-  const rec = scratchTerms.get(sid);
-  if (rec) { try { rec.term.dispose(); } catch (_) {} rec.container.remove(); scratchTerms.delete(sid); }
-  const i = scratchSessions.indexOf(sid); scratchSessions.splice(i, 1);
-  if (scratchActiveId === sid) scratchActiveId = scratchSessions[Math.max(0, i - 1)];
-  showActiveScratch();
-}
-function cycleScratchTab(dir) {
-  if (scratchSessions.length < 2) return;
-  let i = scratchSessions.indexOf(scratchActiveId) + dir;
-  if (i < 0) i = scratchSessions.length - 1; if (i >= scratchSessions.length) i = 0;
-  switchScratchTab(scratchSessions[i]);
-}
-function renameScratchTab(sid) {
-  const rec = scratchTerms.get(sid); if (!rec) return;
-  showPrompt('Переименовать вкладку', 'Название', rec.name, (v) => { rec.name = v; renderScratchTabs(); });
-}
-function refitScratch(focusIt) {
-  if (!scratchOpen || !scratchActiveId) return;
-  const rec = scratchTerms.get(scratchActiveId); if (!rec) return;
-  requestAnimationFrame(() => {
-    try { rec.fit.fit(); lite.pty.resize(scratchActiveId, rec.term.cols, rec.term.rows); if (focusIt) rec.term.focus(); } catch (_) {}
-  });
-}
-function setScratchOpen(open, opts = {}) {
-  if (open === scratchOpen) { if (open) refitScratch(true); return; }
-  // System terminals are a right-slot module now → mutually exclusive with the rest.
-  if (open) closeOtherPanels('scratch');
-  const delta = layout.scratch + GUTTER;
-  scratchOpen = open;
-  $('#scratch-pane').classList.toggle('hidden', !open);
-  $('#gutter-scratch').classList.toggle('hidden', !open);
-  if (opts.grow !== false) lite.win.growBy(open ? delta : -delta); // grow:false on restore — saved width already counts this pane
-  saveUiState();
-  if (open) { ensureScratch(); setTimeout(() => showActiveScratch(), 60); }
-  setTimeout(refitActiveTerminal, 160);
-}
-function restartScratch(id) {
-  const sid = (id && scratchTerms.has(id)) ? id : scratchActiveId;
-  const rec = scratchTerms.get(sid); if (!rec) return;
-  try { rec.term.reset(); } catch (_) {}
-  lite.pty.restart({ id: sid, cols: rec.term.cols, rows: rec.term.rows }); // no cwd → ~
-  rec.term.focus();
-}
 
 // Терминал dev-папки модуля: PTY+xterm в переданном контейнере (живёт в #ext-pane).
 // Возвращает handle для extensions.js; xterm в код модуля не утекает (правило изоляции).
@@ -1476,11 +1207,10 @@ function createExtTerminal(container, cwd) {
 let watchedRoot = null; // we live-watch only the active project to limit inotify use
 function applyFontSize() {
   for (const rec of terms.values()) { rec.term.options.fontSize = settings.fontSize; try { rec.fit.fit(); } catch (_) {} }
-  for (const rec of scratchTerms.values()) { rec.term.options.fontSize = settings.fontSize; try { rec.fit.fit(); } catch (_) {} }
   for (const rec of extTerms.values()) { rec.term.options.fontSize = settings.fontSize; try { rec.fit.fit(); } catch (_) {} }
-  Rh.applyFontSize(); // SSH-терминалы модуля «Удалённые хосты»
   document.documentElement.style.setProperty('--editor-fs', settings.fontSize + 'px');
   refitActiveTerminal();
+  try { lite.app.settingsChanged(settings); } catch (_) {} // окно «Система · ~» подхватит размер шрифта
 }
 function bumpFont(delta) {
   settings.fontSize = Math.max(9, Math.min(24, settings.fontSize + delta));
@@ -1509,509 +1239,42 @@ function runTermSearch(dir) {
   if (dir < 0) rec.search.findPrevious(q, opts); else rec.search.findNext(q, opts);
 }
 
-// Don't lose unsaved viewer edits when switching away — ask first.
-function guardDirty(proceed) {
-  if (!dirty || !currentFile) { proceed(); return; }
-  showConfirm(
-    'Несохранённые изменения',
-    `Файл «${baseName(currentFile)}» изменён. Сохранить перед переключением?`,
-    'Сохранить',
-    async () => { if (await saveCurrent()) proceed(); }, // failed save → stay put, don't lose edits
-    'Не сохранять',
-    () => { markDirty(false); proceed(); },
-  );
-}
+// guardDirty (защита несохранённых правок вивера при переключении) переехал в files.js → Files.guardDirty.
 
 function setActive(id) {
   const proj = projects.find((p) => p.id === id);
   if (!proj) return;
-  if (id === activeId && activeOrId === null) return;
-  guardDirty(() => doSetActive(id));
+  if (id === activeId) return;
+  doSetActive(id); // окно вивера само защитит несохранённые правки при смене активного проекта
 }
 function doSetActive(id) {
   const proj = projects.find((p) => p.id === id);
   if (!proj) return;
   activeId = id;
   try { lite.errors.setContext(proj.path); } catch (_) {} // тег проекта для новых ошибок в реестре
-  activeOrId = null; // selecting a project always leaves chat mode
-  activeDocId = null; // …и режим документа «Обработки текста»
   if (watchedRoot && watchedRoot !== proj.path) lite.fs.unwatch(watchedRoot);
   lite.fs.watch(proj.path); watchedRoot = proj.path;
-  for (const d of expandedDirs) if (!pathInside(d, proj.path)) expandedDirs.delete(d); // не копить пути чужих проектов за сессию
   ensureProjectTabs(proj);
   renderProjects();
   showActiveTerminal();
   applyFontSize();
-  if (viewerOpen) refreshViewerForActive();
-  if (Git.isOpen()) Git.renderPanel(proj); // Git module follows the active project
-  if (Notes.isOpen()) Notes.renderPanel(proj); // панель задач следует за активным проектом
-  if (Audit.isOpen()) Audit.renderPanel(); // аудит следует за активным проектом
-  try { Ctx.onProjectChange(proj); } catch (_) {} // канва «Контекста» следует за активным проектом
+  // вивер живёт в своём окне и следует за проектом через app:activeProject (pushActiveProject ниже)
   try { Ext.notifyActiveProject(activeId); } catch (_) {} // пользовательские модули: ctx.projects.onChange
+  pushActiveProject(proj); // окна модулей (git/ctx/notes/audit): следовать за активным проектом редактора
+}
+// Сообщить окнам модулей о текущем активном проекте (кэшируется в main, рассылается окнам).
+function pushActiveProject(proj) {
+  try {
+    const p = proj || projects.find((x) => x.id === activeId);
+    lite.app.setActiveProject(p ? { id: p.id, path: p.path, name: p.name, accent: p.accent || '' } : null);
+  } catch (_) {}
 }
 
-// ---------------------------------------------------------------- viewer (CodeMirror)
-const LANGS = {
-  js: javascript, jsx: javascript, mjs: javascript, cjs: javascript,
-  ts: () => javascript({ typescript: true }), tsx: () => javascript({ typescript: true, jsx: true }),
-  py: python, json, md: markdown, markdown, html, htm: html, css, scss: css,
-};
-function languageFor(file) {
-  const make = LANGS[extOf(file)];
-  return make ? make() : [];
-}
-// Миникарта (VSCode-стиль): уменьшенная копия кода справа с индикатором области и кликом-прыжком.
-const minimapExt = showMinimap.compute([], () => ({
-  create: () => ({ dom: document.createElement('div') }),
-  displayText: 'blocks',     // быстрый блочный рендер вместо посимвольного
-  showOverlay: 'always',     // всегда показывать рамку текущей области
-}));
-const minimapComp = new Compartment(); // вкл/выкл миникарты без пересоздания редактора
-function toggleMinimap() {
-  settings.minimap = !settings.minimap;
-  saveSettings();
-  if (editor) {
-    editor.dispatch({ effects: minimapComp.reconfigure(settings.minimap ? minimapExt : []) });
-    // При включении миникарта пустая, пока редактор не пере-замерит геометрию. Сработать заставляет только
-    // реальное изменение размера панели вивера (ResizeObserver редактора) — повторяем это: на миг дёргаем
-    // ширину панели на 1px и возвращаем (визуально незаметно).
-    if (settings.minimap) {
-      const pane = $('#viewer-pane'); const base = layout.viewer;
-      pane.style.flexBasis = (base + 1) + 'px';
-      setTimeout(() => { pane.style.flexBasis = base + 'px'; }, 60);
-    }
-  }
-  $('#viewer-minimap').classList.toggle('on', settings.minimap);
-}
-function makeEditor() {
-  const state = EditorState.create({
-    doc: '',
-    extensions: [
-      lineNumbers(), gitGutterField, gitGutterExt, highlightActiveLine(), drawSelection(), history(),
-      indentOnInput(), bracketMatching(), highlightSelectionMatches(), search({ top: true }),
-      syntaxHighlighting(defaultHighlightStyle, { fallback: true }), oneDark,
-      minimapComp.of(settings.minimap ? minimapExt : []),
-      langComp.of([]),
-      keymap.of([
-        { key: 'Mod-s', preventDefault: true, run: () => { saveCurrent(); return true; } },
-        indentWithTab, ...searchKeymap, ...defaultKeymap, ...historyKeymap,
-      ]),
-      EditorView.updateListener.of((u) => { if (u.docChanged && !loadingDoc) markDirty(true); }),
-    ],
-  });
-  editor = new EditorView({ state, parent: $('#editor') });
-}
-// Подсветка строк по эффекту (для конфликтных регионов merge-модалки): per-line background-класс.
-const setMarksEffect = StateEffect.define();
-const marksField = StateField.define({
-  create: () => Decoration.none,
-  update(deco, tr) {
-    deco = deco.map(tr.changes);
-    for (const e of tr.effects) if (e.is(setMarksEffect)) deco = e.value;
-    return deco;
-  },
-  provide: (f) => EditorView.decorations.from(f),
-});
-// ---- git-маркеры в гаттере вивера: цветная полоса слева для строк, изменённых относительно HEAD.
-// Данные берём из `git diff HEAD -- file` (тот же источник, что diff-режим), парсим ханки в пер-строчные метки.
-const setGitGutterEffect = StateEffect.define(); // value: [{ line, type }] — line 1-based, type: added|modified|deleted
-class GitGutterMarker extends GutterMarker {
-  constructor(type) { super(); this.type = type; }
-  eq(o) { return o.type === this.type; }
-  toDOM() { const d = document.createElement('div'); d.className = 'cm-git-mark git-' + this.type; return d; }
-}
-const gitGutterField = StateField.define({
-  create: () => RangeSet.empty,
-  update(set, tr) {
-    set = set.map(tr.changes);
-    for (const e of tr.effects) {
-      if (!e.is(setGitGutterEffect)) continue;
-      const doc = tr.state.doc, ranges = [];
-      for (const m of e.value) {
-        if (m.line >= 1 && m.line <= doc.lines) ranges.push(new GitGutterMarker(m.type).range(doc.line(m.line).from));
-      }
-      ranges.sort((a, b) => a.from - b.from);
-      set = RangeSet.of(ranges, true);
-    }
-    return set;
-  },
-});
-const gitGutterExt = gutter({
-  class: 'cm-git-gutter',
-  markers: (view) => view.state.field(gitGutterField),
-});
-// Unified diff → пер-строчные метки для НОВОЙ версии файла (что лежит в редакторе).
-// Блок «-…+…» = modified; одиночные «+» = added; «-» без последующих «+» = deleted (треугольник на стыке).
-function parseDiffToMarks(diff) {
-  const marks = [];
-  if (!diff) return marks;
-  let newLine = 0, del = 0;
-  const flushDel = (at) => { if (del > 0) { marks.push({ line: Math.max(1, at), type: 'deleted' }); del = 0; } };
-  for (const ln of diff.split('\n')) {
-    if (ln.startsWith('@@')) {
-      flushDel(newLine);
-      const m = ln.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-      if (m) newLine = parseInt(m[1], 10);
-      del = 0; continue;
-    }
-    if (ln.startsWith('+++') || ln.startsWith('---') || ln.startsWith('diff ') || ln.startsWith('index ') ||
-        ln.startsWith('new file') || ln.startsWith('deleted file') || ln.startsWith('\\') || ln.startsWith('Binary')) continue;
-    const c = ln[0];
-    if (c === '+') { marks.push({ line: newLine, type: del > 0 ? 'modified' : 'added' }); if (del > 0) del--; newLine++; }
-    else if (c === '-') { del++; }
-    else { flushDel(newLine); newLine++; }            // контекст (' ') или хвостовая пустая строка
-  }
-  flushDel(newLine);
-  return marks;
-}
-// Пересчитать git-гаттер для открытого файла (fire-and-forget; гонки гасим сверкой currentFile).
-async function updateGitGutter(file) {
-  if (!editor) return;
-  if (!file || previewKind(file) === 'image') { clearGitGutter(); return; }
-  const p = activeProject(); if (!p) { clearGitGutter(); return; }
-  let res; try { res = await lite.git.fileDiff(p.path, file); } catch (_) { return; }
-  if (file !== currentFile) return;                   // переключили файл за время await
-  editor.dispatch({ effects: setGitGutterEffect.of(parseDiffToMarks(res && res.diff ? res.diff : '')) });
-}
-function clearGitGutter() { if (editor) editor.dispatch({ effects: setGitGutterEffect.of([]) }); }
-// Переиспользуемая фабрика CodeMirror для модулей (merge-модалка git): та же тема/подсветка, что у вивера,
-// но изолированный инстанс. opts: { doc, readOnly, language, onChange } → { view, getValue, setMarks, scrollToLine, destroy }.
-function createCodeEditor(parent, opts = {}) {
-  const exts = [
-    lineNumbers(), drawSelection(), history(), indentOnInput(), bracketMatching(),
-    syntaxHighlighting(defaultHighlightStyle, { fallback: true }), oneDark, marksField,
-    opts.language || [],
-    keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
-  ];
-  if (opts.readOnly) exts.push(EditorState.readOnly.of(true), EditorView.editable.of(false));
-  if (opts.onChange) exts.push(EditorView.updateListener.of((u) => { if (u.docChanged) opts.onChange(u.state.doc.toString()); }));
-  const view = new EditorView({ state: EditorState.create({ doc: opts.doc || '', extensions: exts }), parent });
-  return {
-    view,
-    getValue: () => view.state.doc.toString(),
-    // specs: [{ fromLine, toLine, cls }] — 1-based включительно; подсвечивает целые строки.
-    setMarks: (specs) => {
-      const total = view.state.doc.lines;
-      const deco = [];
-      for (const s of (specs || [])) {
-        for (let ln = Math.max(1, s.fromLine); ln <= Math.min(total, s.toLine); ln++) {
-          deco.push(Decoration.line({ class: s.cls }).range(view.state.doc.line(ln).from));
-        }
-      }
-      deco.sort((a, b) => a.from - b.from);
-      view.dispatch({ effects: setMarksEffect.of(Decoration.set(deco, true)) });
-    },
-    scrollToLine: (ln) => {
-      const total = view.state.doc.lines;
-      const pos = view.state.doc.line(Math.max(1, Math.min(total, ln))).from;
-      view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: 'center' }) });
-    },
-    destroy: () => view.destroy(),
-  };
-}
-function previewKind(file) {
-  const e = extOf(file);
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'].includes(e)) return 'image';
-  if (['md', 'markdown'].includes(e)) return 'markdown';
-  if (['html', 'htm'].includes(e)) return 'html';
-  return null;
-}
-// Commit the viewer chrome (filename, preview/fullscreen buttons, tree highlight) for an
-// open file. Вынесено из openFile, чтобы ставить эти метки ТОЛЬКО после успешного чтения —
-// иначе при ошибке вивер показывал имя/подсветку файла без живого currentFile (рассинхрон).
-function commitOpenUI(filePath, kind) {
-  $('#viewer-filename').textContent = baseName(filePath);
-  $('#viewer-preview').style.display = (kind && kind !== 'image') ? '' : 'none'; // toggle only when there's source too
-  $('#viewer-full').style.display = (kind === 'html') ? '' : 'none'; // «на весь экран» только для HTML-вёрстки
-  document.querySelectorAll('.tree-row.open').forEach((r) => r.classList.remove('open'));
-  const row = document.querySelector(`.tree-row[data-path="${cssEscape(filePath)}"]`);
-  if (row) row.classList.add('open');
-}
-let openSeq = 0; // монотонный токен открытия — против гонки при быстром переключении файлов
-async function openFile(filePath, line) {
-  const seq = ++openSeq;
-  if (diffMode) exitDiff(false);
-  exitPreview();
-  hideReloadBar();
-  const kind = previewKind(filePath);
-
-  if (kind === 'image') { // binary — no editable source
-    currentFile = filePath;
-    commitOpenUI(filePath, kind);
-    setEditorText('', []); markDirty(false); clearGitGutter();
-    await showPreview('image', filePath, '');
-    return;
-  }
-  const res = await lite.fs.readFile(filePath);
-  if (seq !== openSeq) return; // обогнал более свежий openFile — выходим, не затирая его результат
-  if (res.error) { toast(res.error, { kind: 'err', ttl: 6000 }); return; } // оставляем текущий файл нетронутым
-  currentFile = filePath;
-  commitOpenUI(filePath, kind);
-  setEditorText(res.content, languageFor(filePath));
-  markDirty(false);
-  updateGitGutter(filePath);
-  // md/html по умолчанию открываются рендером; но если явно просили строку (переход из аудита/поиска) —
-  // показываем исходник и прыгаем на строку, иначе номер строки потерялся бы в превью.
-  if (kind && !(line && line > 0)) await showPreview(kind, filePath, res.content);
-  else if (line && line > 0) requestAnimationFrame(() => { if (seq === openSeq) gotoLine(line); }); // не прыгать в чужом доке, если уже открыли другой файл
-}
-
-// ---------------------------------------------------------------- viewer preview (md/image/html)
-// Чистим распарсенный markdown ПЕРЕД вставкой в DOM. CSP уже блокирует исполнение инлайн-скриптов,
-// это второй рубеж (и страховка, если CSP когда-нибудь ослабят): убираем активные узлы и обработчики.
-function sanitizePreviewHtml(root) {
-  root.querySelectorAll('script, iframe, frame, object, embed, base, link, meta').forEach((n) => n.remove());
-  root.querySelectorAll('*').forEach((n) => {
-    for (const attr of [...n.attributes]) {
-      const name = attr.name.toLowerCase();
-      if (name.startsWith('on')) n.removeAttribute(attr.name); // инлайн-обработчики (onerror/onclick/…)
-      else if (/^(href|src|xlink:href)$/.test(name) && /^\s*javascript:/i.test(attr.value)) n.removeAttribute(attr.name);
-    }
-  });
-}
-async function showPreview(kind, file, content) {
-  if (diffMode) exitDiff(false); // diff и preview взаимоисключающие — иначе оба оверлея накладываются
-  previewMode = true;
-  const view = $('#preview-view');
-  view.innerHTML = '';
-  if (kind === 'image') {
-    const res = await lite.fs.readDataUrl(file);
-    if (file !== currentFile) return; // обогнали более свежим open — не дорисовываем в чужой view (гонка)
-    if (res.error) view.appendChild(el('div', 'prev-empty', res.error));
-    else { const img = el('img', 'prev-img'); img.src = res.url; view.appendChild(img); }
-  } else if (kind === 'markdown') {
-    const div = el('div', 'prev-md');
-    try { div.innerHTML = marked.parse(content || '', { breaks: true }); } catch (_) { div.textContent = content || ''; }
-    sanitizePreviewHtml(div); // defense-in-depth поверх CSP: вырезать <script>/iframe/инлайн-обработчики/javascript:
-    const base = dirName(file);
-    div.querySelectorAll('img').forEach((im) => { // resolve relative image paths from the file's folder
-      const s = im.getAttribute('src') || '';
-      if (s && !/^(https?:|data:|file:|\/\/)/i.test(s)) im.src = fileUrl(base + '/' + s.replace(/^\.\//, ''));
-    });
-    div.addEventListener('click', (e) => { const a = e.target.closest('a'); if (a && /^https?:/i.test(a.href)) { e.preventDefault(); lite.openExternal(a.href); } });
-    view.appendChild(div);
-  } else if (kind === 'html') {
-    const frame = document.createElement('iframe');
-    frame.className = 'prev-frame';
-    // load from disk (not srcdoc) so relative css/js/img resolve against the project folder
-    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals');
-    frame.src = fileUrl(file);
-    view.appendChild(frame);
-  }
-  $('#editor').style.display = 'none';
-  view.style.display = 'block';
-  $('#viewer-preview').classList.add('on');
-}
-function exitPreview() {
-  exitPreviewFull(); // на всякий случай свернуть полноэкранный режим
-  previewMode = false;
-  const v = $('#preview-view');
-  if (v) { v.style.display = 'none'; v.innerHTML = ''; }
-  $('#editor').style.display = '';
-  $('#viewer-preview').classList.remove('on');
-}
-function togglePreview() {
-  if (previewMode) { exitPreview(); editor.focus(); return; }
-  const kind = previewKind(currentFile);
-  if (kind) showPreview(kind, currentFile, editor.state.doc.toString());
-}
-// «Превью HTML на весь экран» — оверлей поверх всего окна для быстрой проверки вёрстки (Esc / ✕ — выход).
-async function enterPreviewFull() {
-  if (previewKind(currentFile) !== 'html') return;
-  if (!previewMode) await showPreview('html', currentFile, editor.state.doc.toString()); // включить превью, если смотрели исходник
-  if (!$('#preview-full-exit')) {
-    const btn = el('button', 'pf-exit', '✕ Esc');
-    btn.id = 'preview-full-exit';
-    btn.title = 'Выйти из полноэкранного превью (Esc)';
-    btn.addEventListener('click', exitPreviewFull);
-    document.body.appendChild(btn);
-  }
-  $('#preview-full-exit').style.display = '';
-  document.body.classList.add('preview-full');
-}
-function exitPreviewFull() {
-  if (!document.body.classList.contains('preview-full')) return;
-  document.body.classList.remove('preview-full');
-  const btn = $('#preview-full-exit');
-  if (btn) btn.style.display = 'none';
-}
-function togglePreviewFull() {
-  if (document.body.classList.contains('preview-full')) exitPreviewFull();
-  else enterPreviewFull();
-}
-function gotoLine(line) {
-  const doc = editor.state.doc;
-  const pos = doc.line(Math.max(1, Math.min(line, doc.lines))).from;
-  editor.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
-  editor.focus();
-}
-// Reload the open file from disk (agent changed it) — keep caret roughly put.
-async function reloadCurrentFile() {
-  if (!currentFile) return;
-  const kind = previewKind(currentFile);
-  if (kind === 'image') { // бинарник: исходника нет — обновляем только открытое превью
-    if (previewMode) await showPreview('image', currentFile, '');
-    return;
-  }
-  const f = currentFile;
-  const res = await lite.fs.readFile(f);
-  if (f !== currentFile) return; // за время чтения открыли другой файл — не подменяем его содержимым этого
-  if (res.error) return;
-  const head = editor.state.selection.main.head;
-  setEditorText(res.content, languageFor(currentFile));
-  markDirty(false);
-  hideReloadBar();
-  updateGitGutter(currentFile);
-  try { editor.dispatch({ selection: { anchor: Math.min(head, editor.state.doc.length) } }); } catch (_) {}
-  if (previewMode && kind) await showPreview(kind, currentFile, res.content); // перерисовать рендер md/html
-}
-// Перезапросить дифф открытого файла, когда он изменился на диске (агент правит, а мы смотрим дифф).
-// Read-only: трогаем только #diff-view, редактор/несохранённые правки не задеваем.
-async function reloadCurrentDiff() {
-  if (!currentFile || !diffMode) return;
-  const p = activeProject(); if (!p) return;
-  const res = await lite.git.fileDiff(p.path, currentFile);
-  if (!diffMode || !currentFile) return; // режим мог смениться за время await
-  showDiff(res && res.diff ? res.diff : '');
-}
-function setEditorText(text, lang) {
-  loadingDoc = true;
-  editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: text }, effects: langComp.reconfigure(lang) });
-  loadingDoc = false;
-}
-function markDirty(v) { dirty = v; $('#viewer-dirty').classList.toggle('show', v); }
-// Плашка-конфликт: файл изменился на диске, пока у нас есть несохранённые правки (агент тронул открытый файл).
-// Постоянная (в отличие от тоста) — пока пользователь не решит: перечитать с диска или оставить своё.
-function showReloadBar() { $('#viewer-reload-bar').classList.remove('hidden'); }
-function hideReloadBar() { $('#viewer-reload-bar').classList.add('hidden'); }
-// Returns true when the file is safely on disk (or there was nothing to save), false on a
-// failed write. Callers that gate a destructive next step (guardDirty) must NOT proceed on
-// false, or the unsaved edits are lost.
-async function saveCurrent() {
-  if (!currentFile || !dirty) return true;
-  let res;
-  try { res = await lite.fs.writeFile(currentFile, editor.state.doc.toString()); }
-  catch (e) { res = { error: String(e) }; }
-  if (res && res.ok) { markDirty(false); hideReloadBar(); updateGitGutter(currentFile); return true; }
-  toast(`Не удалось сохранить: ${(res && res.error) || 'ошибка записи'}`, { kind: 'err', ttl: 6000 });
-  return false;
-}
-
-// ---------------------------------------------------------------- git diff in the viewer
-async function toggleDiff() {
-  if (diffMode) { exitDiff(true); return; }
-  if (!currentFile) return;
-  const p = activeProject(); if (!p) return;
-  const file = currentFile;
-  const res = await lite.git.fileDiff(p.path, file);
-  if (currentFile !== file) return; // переключили файл за время await — не показываем устаревший дифф
-  showDiff(res && res.diff ? res.diff : '');
-}
-function showDiff(text) {
-  if (previewMode) exitPreview(); // preview и diff взаимоисключающие — иначе оба оверлея накладываются
-  diffMode = true;
-  const view = $('#diff-view');
-  view.innerHTML = '';
-  if (!text.trim()) {
-    view.appendChild(el('div', 'diff-empty', 'Нет изменений относительно HEAD (или это не git-репозиторий).'));
-  } else {
-    for (const ln of text.split('\n')) {
-      let cls = '';
-      if (ln.startsWith('@@')) cls = 'hunk';
-      else if (ln.startsWith('+++') || ln.startsWith('---') || ln.startsWith('diff ') || ln.startsWith('index ')) cls = 'meta';
-      else if (ln.startsWith('+')) cls = 'add';
-      else if (ln.startsWith('-')) cls = 'del';
-      view.appendChild(el('div', 'diff-line ' + cls, ln || ' '));
-    }
-  }
-  $('#editor').style.display = 'none';
-  view.style.display = 'block';
-  $('#viewer-diff').classList.add('on');
-}
-function exitDiff(refocus) {
-  diffMode = false;
-  $('#diff-view').style.display = 'none';
-  $('#editor').style.display = '';
-  $('#viewer-diff').classList.remove('on');
-  if (refocus) editor.focus();
-}
-
-// ---------------------------------------------------------------- git status (tree decorations)
-async function loadGitStatus(proj) {
-  if (!proj) { gitFiles = {}; return; }
-  const res = await lite.git.status(proj.path);
-  gitFiles = res && res.files ? res.files : {};
-  // освежить гаттер после внешних git-операций (коммит/checkout → tree refresh); только при чистом буфере —
-  // иначе перерисовали бы метки по диск-vs-HEAD, не совпадающие с несохранёнными правками в редакторе
-  if (currentFile && !dirty) updateGitGutter(currentFile);
-}
-function gitClassFor(p) {
-  const c = gitFiles[p];
-  if (!c) return '';
-  if (c === '?' || c.includes('A')) return 'g-add';
-  if (c.includes('D')) return 'g-del';
-  return 'g-mod';
-}
-function dirGitClass(dirPath) {
-  for (const k in gitFiles) {
-    if (k.length > dirPath.length && k.startsWith(dirPath) && (k[dirPath.length] === '/' || k[dirPath.length] === '\\')) return 'g-mod';
-  }
-  return '';
-}
-
-// ---------------------------------------------------------------- toasts
-function clearViewer() {
-  if (diffMode) exitDiff(false); // иначе оверлей диффа/превью старого файла остаётся висеть при смене проекта/чате/удалении
-  exitPreview();
-  currentFile = null;
-  setEditorText('', []);
-  clearGitGutter();
-  hideReloadBar();
-  $('#viewer-filename').textContent = '—';
-  markDirty(false);
-  document.querySelectorAll('.tree-row.open').forEach((r) => r.classList.remove('open'));
-}
-// Re-render the tree for the active project; viewer starts empty (no auto-reopen).
-// Switching/opening a project always gives a clean viewer — open files from the tree.
-// В режиме чата OpenRouter (activeOrId !== null) «выбранного проекта» нет → показываем заглушку.
-async function refreshViewerForActive() {
-  const p = (activeOrId === null) ? activeProject() : null;
-  if (!p) { showViewerPlaceholder(); return; }
-  await renderTree(p);
-  clearViewer();
-}
-// Заглушка вивера, когда нет выбранного проекта (открыта категория/чат OpenRouter).
-function showViewerPlaceholder() {
-  $('#tree-title').textContent = 'ДЕРЕВО';
-  const root = $('#tree');
-  root.innerHTML = '';
-  root.appendChild(el('div', 'tree-empty', 'Нужно выбрать проект для отображения файлов'));
-  clearViewer();
-}
-
-// Возвращает промис первичной отрисовки (renderTree + clearViewer), чтобы вызывающий мог
-// дождаться её и лишь потом грузить файл — иначе clearViewer() затрёт свежезагруженный файл.
-function setViewerOpen(open, opts = {}) {
-  if (open === viewerOpen) {
-    const p = open ? refreshViewerForActive() : null;
-    renderProjects();
-    return p;
-  }
-  // Right slot holds one module — opening the viewer closes the others (chat is separate).
-  if (open) closeOtherPanels('files');
-  else exitPreviewFull(); // закрытие вивера (в т.ч. через closeOtherPanels) должно снять плавающую «✕ Esc» полноэкранного превью
-  const delta = layout.viewer + layout.tree + GUTTER * 2;
-  viewerOpen = open;
-  $('#viewer-pane').classList.toggle('hidden', !open);
-  $('#tree-pane').classList.toggle('hidden', !open);
-  document.querySelectorAll('.gutter-v').forEach((g) => g.classList.toggle('hidden', !open));
-  if (opts.grow !== false) lite.win.growBy(open ? delta : -delta); // grow:false on restore — saved width already counts these panes
-  saveUiState();
-  renderProjects();
-  const pending = open ? refreshViewerForActive() : null;
-  setTimeout(refitActiveTerminal, 150);
-  return pending;
-}
+// ---------------------------------------------------------------- viewer + tree → ОТДЕЛЬНОЕ ОКНО (files)
+// Вивер (CodeMirror) и дерево файлов — модуль renderer/modules/files.js, теперь в собственном окне
+// (проектозависимое: следует за активным проектом редактора через app:activeProject). Ядро его НЕ
+// держит: открыть — openModule('files'); открыть файл — lite.editorBus.openInViewer(path,line) (main
+// маршрутизирует в окно вивера, открывая его при необходимости).
 
 // ================================================================ right module slot
 // One module open at a time in the right slot. NOT modules: terminals (project + scratch ~)
@@ -2019,7 +1282,10 @@ function setViewerOpen(open, opts = {}) {
 // Реестр панелей: каждая setXxxOpen знает только себя, взаимоисключение — closeOtherPanels.
 // Порядок закрытия фиксирован (он же — порядок старых inline-цепочек во всех setXxxOpen).
 const panels = new Map(); // id -> { isOpen(), setOpen(open, opts) }
-const PANEL_ORDER = ['files', 'git', 'ctx', 'docker', 'db', 'scratch', 'rh', 'notes', 'audit', 'iterflow', 'seo', 'tools'];
+// Правый слот редактора теперь держит только «Мои модули» (ext); всё остальное — отдельные окна.
+const PANEL_ORDER = [];
+// Модули, мигрированные в отдельные окна (открываются через lite.module.open, не как панель правого слота).
+const WINDOW_MODULES = new Set(['tools', 'iterflow', 'seo', 'audit', 'notes', 'db', 'git', 'chat', 'doc', 'docker', 'rh', 'ctx', 'scratch', 'files']);
 function registerPanel(id, api) { panels.set(id, api); }
 function closeOtherPanels(selfId) {
   for (const id of PANEL_ORDER) {
@@ -2028,58 +1294,24 @@ function closeOtherPanels(selfId) {
     if (p && p.isOpen()) p.setOpen(false);
   }
 }
-// 'files': повторное открытие — no-op (как старое `if (!viewerOpen) setViewerOpen(true)` в openModule).
-registerPanel('files', { isOpen: () => viewerOpen, setOpen: (open, opts) => { if (open && viewerOpen) return; setViewerOpen(open, opts); } });
-// Git — первый вынесенный модуль (renderer/modules/git.js, host-контракт по образцу textproc).
-const Git = initGit({
-  layout, GUTTER, saveUiState, renderProjects, refitActiveTerminal,
-  activeProject, getActiveId: () => activeId, refreshTree, closeOtherPanels,
-  createCodeEditor, languageFor,
-});
-registerPanel('git', { isOpen: Git.isOpen, setOpen: Git.setOpen });
-// «Контекст» — граф контекста агента (renderer/modules/contextgraph.js, канва как n8n).
-const Ctx = initCtx({
-  layout, GUTTER, saveUiState, refitActiveTerminal,
-  activeProject, getActiveId: () => activeId, closeOtherPanels,
-});
-registerPanel('ctx', { isOpen: Ctx.isOpen, setOpen: Ctx.setOpen });
-const Containers = initContainers({
-  STORE, persist, settings, layout, GUTTER, saveUiState, refitActiveTerminal,
-  closeOtherPanels, termTheme, applyUnicode11, loadFastRenderer,
-});
-registerPanel('docker', { isOpen: Containers.isOpen, setOpen: Containers.setOpen });
-const Db = initDb({ STORE, persist, layout, GUTTER, saveUiState, refitActiveTerminal, closeOtherPanels });
-registerPanel('db', { isOpen: Db.isOpen, setOpen: Db.setOpen });
-registerPanel('scratch', { isOpen: () => scratchOpen, setOpen: setScratchOpen });
-const Rh = initRh({
-  STORE, persist, settings, layout, GUTTER, saveUiState, refitActiveTerminal,
-  closeOtherPanels, termTheme, applyUnicode11, loadFastRenderer, copySelection,
-});
-registerPanel('rh', { isOpen: Rh.isOpen, setOpen: Rh.setOpen });
-// Задачи/заметки — панель правого слота (renderer/modules/notes.js); следует за активным проектом.
-registerPanel('notes', { isOpen: Notes.isOpen, setOpen: Notes.setOpen });
-// Аудит — базовый рентген активного проекта (renderer/modules/audit.js); следует за проектом.
-const Audit = initAudit({
-  layout, GUTTER, saveUiState, refitActiveTerminal, activeProject, closeOtherPanels,
-  openInViewer: async (abs, line) => { if (!viewerOpen) await setViewerOpen(true); await openFile(abs, line); },
-  sendToTerminal: (text) => { const p = activeProject(); if (p) sendNoteToTerminal(p, text); },
-});
-registerPanel('audit', { isOpen: Audit.isOpen, setOpen: Audit.setOpen });
-// IterFlow — таск-трекер исполнителя (renderer/modules/iterflow.js); системная панель, данные из IterFlow (/api/editor/*), не зависит от папки редактора.
-const Iterflow = initIterflow({
-  layout, GUTTER, saveUiState, refitActiveTerminal, closeOtherPanels,
-});
-registerPanel('iterflow', { isOpen: Iterflow.isOpen, setOpen: Iterflow.setOpen });
-// WEB/SEO аудит — самостоятельный анализатор сайтов (renderer/modules/seo.js); системная панель, свой список сайтов.
-const Seo = initSeo({
-  layout, GUTTER, saveUiState, refitActiveTerminal, closeOtherPanels, STORE, persist,
-});
-registerPanel('seo', { isOpen: Seo.isOpen, setOpen: Seo.setOpen });
+// Вивер+дерево (files) мигрированы в отдельное окно (проектозависимое: следует за активным проектом).
+// В реестре панелей больше нет; открытие — openModule('files'). См. WINDOW_MODULES / module-entry.js.
+// Git мигрирован в отдельное окно (проектозависимое: следует за активным проектом редактора).
+// См. WINDOW_MODULES / module-entry.js.
+// «Контекст» (ctx) — граф контекста агента (канва n8n) мигрирован в отдельное окно (проектозависимое:
+// следует за активным проектом редактора). autoApply (тихая автосборка) портирована в ядро (ctxAutoApply).
+// Контейнеры (docker), «Базы данных» (db), «Удалённые хосты» (rh) мигрированы в отдельные окна
+// (самостоятельные). Стримы (containers:*/rh:*) маршрутизируются по окну-владельцу. См. module-entry.js.
+// scratch (системный терминал) мигрирован в отдельное окно — в реестре панелей больше нет.
+// Задачи (notes) мигрированы в отдельное окно (проектозависимое: следует за активным проектом редактора).
+// Аудит (audit) мигрирован в отдельное окно (проектозависимое: следует за активным проектом редактора
+// через app:activeProject). IterFlow и WEB/SEO аудит — тоже отдельные окна. См. module-entry.js.
 // Инструменты — devtools-комбайн (renderer/modules/tools.js); системная панель, чистый фронт без бэкенда.
-const Tools = initTools({
-  STORE, persist, layout, GUTTER, saveUiState, refitActiveTerminal, closeOtherPanels,
-});
-registerPanel('tools', { isOpen: Tools.isOpen, setOpen: Tools.setOpen });
+// «Инструменты» (tools) — мигрирован в отдельное окно: openModule('tools') открывает BrowserWindow
+// (см. WINDOW_MODULES / lite.module.open). В правом слоте больше не регистрируется.
+// OpenRouter (чат) и «Обработка текста» мигрированы в отдельные окна (самостоятельные). Их стримы
+// (openrouter:chunk/done/error, tp:done/error) уже маршрутизируются по окну-отправителю через
+// safeSend(e.sender,…) в main.js → уходят именно в своё окно. См. WINDOW_MODULES / module-entry.js.
 // Пользовательские модули (extensions): загрузчик + общая панель правого слота.
 // renderer/modules/extensions.js; публичный API ctx v1 — спека в module-kit/GUIDE.md.
 const Ext = initExtensions({
@@ -2095,8 +1327,9 @@ const Ext = initExtensions({
 });
 registerPanel('ext', { isOpen: Ext.isOpen, setOpen: Ext.setOpen });
 PANEL_ORDER.push('ext');
-// Entry point used by the «Модули» menu.
+// Entry point used by the «Модули» menu / quickbar. Мигрированные модули открываются окном.
 function openModule(id) {
+  if (WINDOW_MODULES.has(id)) { lite.module.open(id); return; }
   const p = panels.get(id);
   if (p) p.setOpen(true);
 }
@@ -2119,6 +1352,8 @@ const QUICK_BUILTIN = [
   { id: 'iterflow', icon: 'layers',  label: 'IterFlow — задачи итераций (трекер)' },
   { id: 'seo',     icon: 'globe',    label: 'WEB/SEO аудит — анализ сайта' },
   { id: 'tools',   icon: 'wrench',   label: 'Инструменты — base64, JSON/YAML, хэши, regex…' },
+  { id: 'chat',    icon: 'chat',     label: 'OpenRouter — чат по своим API-ключам' },
+  { id: 'doc',     icon: 'note',     label: 'Обработка текста — документы + AI-правки' },
   { id: 'scratch', icon: 'terminal', label: 'Системный терминал (вне проектов)' },
 ];
 function quickAllModules() {
@@ -2215,226 +1450,9 @@ renderQuickbar(); // стартовая отрисовка (пользовате
 // ================================================================ Database module (Postgres/MySQL/SQLite)
 // Вынесен в renderer/modules/db.js (const Db — у реестра панелей).
 
-// ---------------------------------------------------------------- file tree
-const EXT_COLORS = {
-  js: '#e8d44d', jsx: '#e8d44d', mjs: '#e8d44d', cjs: '#e8d44d',
-  ts: '#4a9be0', tsx: '#4a9be0',
-  py: '#5fa6dd', json: '#cbcb41', md: '#9fb3a9', markdown: '#9fb3a9',
-  html: '#e3733b', htm: '#e3733b', css: '#9b6bd6', scss: '#cf6ba0',
-  png: '#b07cd6', jpg: '#b07cd6', jpeg: '#b07cd6', gif: '#b07cd6', webp: '#b07cd6', svg: '#ffb13b',
-  sh: '#89e051', bash: '#89e051', yml: '#dd6c6c', yaml: '#dd6c6c', toml: '#b07a4a',
-  lock: '#7a8a82', txt: '#9fb3a9', env: '#e2c08d', sql: '#e38f3b', vue: '#41b883', go: '#4ad0e0', rs: '#dd8855',
-};
-function extOf(name) { if (!name) return ''; const i = name.lastIndexOf('.'); return i > 0 ? name.slice(i + 1).toLowerCase() : ''; }
-function colorFor(name) { return EXT_COLORS[extOf(name)] || '#8aa79a'; }
-function fileSvg(color) {
-  return svgEl(`<svg class="ti" viewBox="0 0 16 16" width="14" height="14">
-    <path fill="${color}" opacity="0.95" d="M3.5 1.4h5.1L13 5.3v9.3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V2.4a1 1 0 0 1 1-1z"/>
-    <path fill="#06120c" opacity="0.4" d="M8.6 1.4 13 5.3H9.1a.5.5 0 0 1-.5-.5z"/></svg>`);
-}
-function folderSvg(open) {
-  const c = open ? '#7fd9ad' : '#56b98a';
-  return svgEl(`<svg class="ti" viewBox="0 0 16 16" width="14" height="14">
-    <path fill="${c}" d="M1.4 3.6h4.2l1.2 1.5H14.6a1 1 0 0 1 1 1v6.4a1 1 0 0 1-1 1H1.4a1 1 0 0 1-1-1V4.6a1 1 0 0 1 1-1z"/></svg>`);
-}
-
-async function renderTree(proj) {
-  $('#tree-title').textContent = proj.name.toUpperCase();
-  await loadGitStatus(proj);
-  const root = $('#tree');
-  root.innerHTML = '';
-  await buildDir(proj.path, root, 0);
-}
-// ---- drag-and-drop в дереве: перемещение узлов (move) + втягивание файлов извне (copy из ОС)
-let dragSrcPath = null;   // путь перетаскиваемого узла (внутренний drag дерево→дерево); у внешнего drag из ОС — null
-let dropHLRow = null;     // подсвеченная папка-приёмник
-function setDropHL(row) { if (dropHLRow && dropHLRow !== row) dropHLRow.classList.remove('drag-over'); dropHLRow = row; if (row) row.classList.add('drag-over'); }
-function clearDropHL() { if (dropHLRow) { dropHLRow.classList.remove('drag-over'); dropHLRow = null; } $('#tree').classList.remove('drag-over-root'); }
-// Любую строку (файл/папку) можно «взять» мышью.
-function makeRowDraggable(row, srcPath) {
-  row.draggable = true;
-  row.addEventListener('dragstart', (e) => {
-    dragSrcPath = srcPath;
-    e.dataTransfer.effectAllowed = 'copyMove';
-    try { e.dataTransfer.setData('text/plain', srcPath); } catch (_) {}
-    e.stopPropagation();
-  });
-  row.addEventListener('dragend', () => { dragSrcPath = null; clearDropHL(); });
-}
-// Папка-строка — приёмник: внутренний move кладёт узел внутрь; внешний drop из ОС — копирует файлы внутрь.
-function makeRowDropTarget(row, destDir) {
-  row.addEventListener('dragover', (e) => {
-    e.preventDefault(); e.stopPropagation();
-    e.dataTransfer.dropEffect = dragSrcPath ? 'move' : 'copy';
-    setDropHL(row);
-  });
-  row.addEventListener('dragleave', (e) => { if (e.target === row && dropHLRow === row) clearDropHL(); });
-  row.addEventListener('drop', (e) => { e.preventDefault(); e.stopPropagation(); handleTreeDrop(e, destDir); });
-}
-async function handleTreeDrop(e, destDir) {
-  clearDropHL();
-  if (!destDir) return;
-  const files = e.dataTransfer && e.dataTransfer.files;
-  if (files && files.length) {            // внешний drop из файлового менеджера ОС → копируем внутрь
-    dragSrcPath = null;
-    const srcs = Array.from(files).map((f) => f.path || lite.pathForFile(f)).filter(Boolean);
-    let ok = 0;
-    for (const src of srcs) {
-      const r = await lite.fs.importPath(src, destDir);
-      if (r && r.error) toast(r.error, { kind: 'err' }); else ok++;
-    }
-    if (ok) { expandedDirs.add(destDir); await refreshTree(); toast(ok > 1 ? `Добавлено файлов: ${ok}` : 'Файл добавлен'); }
-    return;
-  }
-  const src = dragSrcPath; dragSrcPath = null;     // внутренний move дерево→дерево
-  if (!src) return;
-  if (src === destDir || dirName(src) === destDir) return;   // сам на себя / та же папка — тихий no-op
-  if (pathInside(destDir, src)) { toast('Нельзя переместить папку внутрь себя', { kind: 'err' }); return; }
-  const r = await lite.fs.move(src, destDir);
-  if (r && r.error) { toast(r.error, { kind: 'err' }); return; }
-  if (currentFile && pathInside(currentFile, src) && r.path) {   // ремап открытого файла после переноса
-    currentFile = r.path + currentFile.slice(src.length);
-    $('#viewer-filename').textContent = baseName(currentFile);
-  }
-  expandedDirs.add(destDir);
-  await refreshTree();
-}
-async function buildDir(dir, container, depth) {
-  const entries = await lite.fs.readDir(dir);
-  if (!Array.isArray(entries)) return;
-  for (const ent of entries) {
-    const indent = depth * 12 + 8;
-    if (ent.dir) {
-      const row = el('div', 'tree-row dir');
-      row.style.paddingLeft = indent + 'px';
-      row.dataset.path = ent.path;
-      const chev = el('span', 'tree-chev', '▸');
-      let icon = folderSvg(false);
-      const name = el('span', 'tree-name', ent.name);
-      const gc = dirGitClass(ent.path); if (gc) name.classList.add(gc);
-      row.appendChild(chev); row.appendChild(icon); row.appendChild(name);
-      const childBox = el('div', 'tree-children');
-      childBox.style.display = 'none';
-      const expand = async () => {
-        if (childBox.childElementCount === 0) await buildDir(ent.path, childBox, depth + 1);
-        childBox.style.display = 'block'; chev.textContent = '▾';
-        const nx = folderSvg(true); icon.replaceWith(nx); icon = nx;
-      };
-      const collapse = () => {
-        childBox.style.display = 'none'; chev.textContent = '▸';
-        const nx = folderSvg(false); icon.replaceWith(nx); icon = nx;
-      };
-      row.addEventListener('click', async () => {
-        if (expandedDirs.has(ent.path)) { expandedDirs.delete(ent.path); collapse(); }
-        else { expandedDirs.add(ent.path); await expand(); }
-      });
-      row.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); showTreeMenu(e.clientX, e.clientY, { name: ent.name, path: ent.path, dir: true }); });
-      makeRowDraggable(row, ent.path); makeRowDropTarget(row, ent.path); // папку можно тащить и в неё можно класть
-      container.appendChild(row); container.appendChild(childBox);
-      if (expandedDirs.has(ent.path)) await expand(); // restore after a live refresh
-    } else {
-      const row = el('div', 'tree-row file');
-      row.style.paddingLeft = indent + 'px';
-      row.dataset.path = ent.path;
-      row.appendChild(el('span', 'tree-chev', ''));
-      row.appendChild(fileSvg(colorFor(ent.name)));
-      const name = el('span', 'tree-name', ent.name);
-      const gc = gitClassFor(ent.path); if (gc) name.classList.add(gc);
-      row.appendChild(name);
-      if (ent.path === currentFile) row.classList.add('open');
-      row.addEventListener('click', () => {
-        if (ent.path === currentFile && viewerOpen) return;
-        if (!viewerOpen) setViewerOpen(true);
-        guardDirty(() => openFile(ent.path));
-      });
-      row.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); showTreeMenu(e.clientX, e.clientY, { name: ent.name, path: ent.path, dir: false }); });
-      makeRowDraggable(row, ent.path); makeRowDropTarget(row, dirName(ent.path)); // тащить файл; drop на него = в его папку
-      container.appendChild(row);
-    }
-  }
-}
-function cssEscape(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/"/g, '\\"'); }
-const dirName = (p) => { const i = p.search(/[\\/][^\\/]*$/); return i >= 0 ? p.slice(0, i) : p; };
-// child == parent или лежит внутри него — учитывает оба сепаратора (важно для Windows-путей)
-const pathInside = (child, parent) => child === parent || (child.startsWith(parent) && (child[parent.length] === '/' || child[parent.length] === '\\'));
-// absolute fs path → file:// URL (Windows C:\x → file:///C:/x), for preview resources
-// encodeURI не трогает % # ? — без этого пути с такими символами ломают src iframe/img (всё после # = фрагмент). % первым, иначе двойное экранирование.
-function fileUrl(p) { let u = String(p).replace(/\\/g, '/'); if (!u.startsWith('/')) u = '/' + u; return 'file://' + encodeURI(u).replace(/%(?![0-9A-Fa-f]{2})/g, '%25').replace(/#/g, '%23').replace(/\?/g, '%3F'); }
-
-// ---------------------------------------------------------------- tree file operations (#6)
-async function refreshTree() { const p = activeProject(); if (p) await renderTree(p); }
-function treeNewFile(parent) {
-  showPrompt('Новый файл', 'Имя файла (можно путь: src/app.js)', '', async (name) => {
-    const r = await lite.fs.create(parent, name, false);
-    if (r && !r.error) { await refreshTree(); if (r.path) { if (!viewerOpen) setViewerOpen(true); openFile(r.path); } }
-    return r;
-  });
-}
-function treeNewFolder(parent) {
-  showPrompt('Новая папка', 'Имя папки', '', async (name) => {
-    const r = await lite.fs.create(parent, name, true);
-    if (r && !r.error) { expandedDirs.add(parent); await refreshTree(); }
-    return r;
-  });
-}
-function treeRename(ent) {
-  showPrompt('Переименовать', 'Новое имя', ent.name, async (name) => {
-    const to = dirName(ent.path) + '/' + name;
-    const r = await lite.fs.rename(ent.path, to);
-    if (r && !r.error) {
-      // ремап открытого файла: и сам файл, и случай переименования папки-предка (иначе stale-путь → запись мимо)
-      if (currentFile && pathInside(currentFile, ent.path)) {
-        currentFile = to + currentFile.slice(ent.path.length);
-        $('#viewer-filename').textContent = baseName(currentFile);
-      }
-      await refreshTree();
-    }
-    return r;
-  });
-}
-function treeDelete(ent) {
-  showConfirm('Удалить?', `«${ent.name}» будет перемещён в корзину.`, 'Удалить', async () => {
-    const r = await lite.fs.trash(ent.path);
-    if (r && r.error) { toast(r.error, { kind: 'err' }); return; }
-    if (currentFile && pathInside(currentFile, ent.path)) clearViewer();
-    await refreshTree();
-  });
-}
-function showTreeMenu(x, y, ent) {
-  closeMenus();
-  const dd = el('div', 'menu-dropdown'); dd.style.minWidth = '190px';
-  dd.addEventListener('click', (e) => e.stopPropagation());
-  if (ent.dir) {
-    dd.appendChild(menuRow('file', 'Новый файл…', () => { closeMenus(); treeNewFile(ent.path); }));
-    dd.appendChild(menuRow('folder', 'Новая папка…', () => { closeMenus(); treeNewFolder(ent.path); }));
-    dd.appendChild(el('div', 'menu-sep'));
-  } else {
-    dd.appendChild(menuRow('eye', 'Открыть', () => { closeMenus(); if (!viewerOpen) setViewerOpen(true); guardDirty(() => openFile(ent.path)); }));
-    if (['html', 'htm'].includes(extOf(ent.name))) dd.appendChild(menuRow('globe', 'Открыть в браузере', () => { closeMenus(); lite.openInBrowser(ent.path).then((r) => { if (r && r.error) toast(r.error, { kind: 'err' }); }); }));
-    dd.appendChild(el('div', 'menu-sep'));
-  }
-  if (!ent.root) {
-    dd.appendChild(menuRow('pencil', 'Переименовать…', () => { closeMenus(); treeRename(ent); }));
-    dd.appendChild(menuRow('trash', 'Удалить…', () => { closeMenus(); treeDelete(ent); }, 'danger'));
-  }
-  dd.appendChild(menuRow('copy', 'Копировать путь', () => { closeMenus(); lite.copyText(ent.path); toast('Путь скопирован'); }));
-  dd.appendChild(menuRow('file', 'Копировать файл', () => { closeMenus(); copyEntryFile(ent.path); }));
-  dd.appendChild(menuRow('folder', 'Показать в проводнике', () => { closeMenus(); revealEntry(ent.path); }));
-  placeMenu(dd, x, y);
-}
-// Положить файл/папку в системный буфер обмена ОС — вставить как файл в файловом менеджере.
-async function copyEntryFile(p) {
-  const r = await lite.copyFile(p);
-  if (!r || r.ok === false) { toast((r && r.error) || 'Не удалось скопировать файл', { kind: 'err' }); return; }
-  toast(r.mode === 'path'
-    ? 'Скопирован путь (копирование файла не поддержано этой ОС)'
-    : `«${baseName(p)}» в буфере — вставьте в файловом менеджере`);
-}
-// Показать файл/папку в системном файловом менеджере с выделением (reveal-in-folder).
-async function revealEntry(p) {
-  const r = await lite.showItemInFolder(p);
-  if (!r || r.ok === false) toast((r && r.error) || 'Не удалось открыть папку', { kind: 'err' });
-}
+// ---------------------------------------------------------------- file tree → модуль files.js
+// Дерево файлов (renderTree/buildDir/dnd/контекст-меню/файловые операции) вынесено в
+// renderer/modules/files.js (initFiles) вместе с вивером. Ядро его не трогает напрямую.
 
 // ---------------------------------------------------------------- gutters (resize)
 function initGutters() {
@@ -2656,6 +1674,8 @@ function buildModulesMenu(dd) {
     sub.appendChild(moduleRow('layers', 'IterFlow', 'задачи итераций из трекера', () => { closeMenus(); openModule('iterflow'); }));
     sub.appendChild(moduleRow('globe', 'WEB/SEO аудит', 'сайт: безопасность, SEO, сеть', () => { closeMenus(); openModule('seo'); }));
     sub.appendChild(moduleRow('wrench', 'Инструменты', 'base64, JSON/YAML, хэши, JWT, regex, diff', () => { closeMenus(); openModule('tools'); }));
+    sub.appendChild(moduleRow('chat', 'OpenRouter', 'чат по своим API-ключам', () => { closeMenus(); openModule('chat'); }));
+    sub.appendChild(moduleRow('note', 'Обработка текста', 'документы + AI-правки фрагментов', () => { closeMenus(); openModule('doc'); }));
     sub.appendChild(el('div', 'menu-sep'));
     sub.appendChild(moduleRow('terminal', 'Системный терминал', 'вне проектов', () => { closeMenus(); openModule('scratch'); }));
   });
@@ -3064,21 +2084,18 @@ function paletteActions() {
   for (const p of projects) acts.push({ label: `Проект: ${p.name}`, hint: p.path, run: () => setActive(p.id) });
   acts.push({ label: 'Открыть папку…', run: openProjectDialog });
   acts.push({ label: 'Создать папку…', run: showCreateFolder });
-  acts.push({ label: viewerOpen ? 'Закрыть вивер' : 'Открыть вивер', run: () => setViewerOpen(!viewerOpen) });
-  acts.push({ label: Git.isOpen() ? 'Закрыть Git' : 'Открыть Git', run: Git.toggle });
-  acts.push({ label: Ctx.isOpen() ? 'Закрыть контекст' : 'Контекст — граф контекста агента', run: Ctx.toggle });
-  if (Ctx.isOpen()) acts.push({ label: 'Контекст: подтвердить (✓ собрать CLAUDE.md / AGENTS.md)', run: () => Ctx.applyCompile() });
-  acts.push({ label: Containers.isOpen() ? 'Закрыть контейнеры' : 'Контейнеры (Docker / Podman)', run: Containers.toggle });
-  acts.push({ label: Db.isOpen() ? 'Закрыть базы данных' : 'Базы данных (Postgres / MySQL / SQLite)', run: Db.toggle });
-  acts.push({ label: Notes.isOpen() ? 'Закрыть задачи' : 'Задачи — заметки проекта', run: Notes.toggle });
+  acts.push({ label: 'Вивер кода (открыть окно)', run: () => openModule('files') });
+  acts.push({ label: 'Открыть Git', run: () => openModule('git') });
+  acts.push({ label: 'Контекст — граф контекста агента', run: () => openModule('ctx') });
+  acts.push({ label: 'Контейнеры (Docker / Podman)', run: () => openModule('docker') });
+  acts.push({ label: 'Базы данных (Postgres / MySQL / SQLite)', run: () => openModule('db') });
+  acts.push({ label: 'Задачи — заметки проекта', run: () => openModule('notes') });
   acts.push({ label: 'Режим «один терминал»', run: toggleSingle });
   acts.push({ label: 'Поиск в терминале', run: openTermSearch });
   acts.push({ label: 'Очистить терминал', run: () => clearTerminal() });
   acts.push({ label: 'Перезапустить терминал', run: () => restartTerminal() });
   acts.push({ label: 'Настройки…', run: showSettings });
-  if (currentFile) acts.push({ label: 'Показать дифф файла', run: toggleDiff });
-  if (currentFile) acts.push({ label: 'Поиск в файле', run: () => { if (viewerOpen && !previewMode) openSearchPanel(editor); } });
-  if (previewKind(currentFile || '')) acts.push({ label: 'Превью файла (вкл/выкл)', run: togglePreview });
+  // Дифф/превью/поиск по файлу — теперь действия внутри окна вивера (его кнопки/горячие клавиши).
   for (const a of Ext.paletteActions()) acts.push(a); // команды пользовательских модулей (ctx.commands)
   return acts;
 }
@@ -3192,7 +2209,7 @@ async function checkForUpdate({ manual = false } = {}) {
 function init() {
   hydrateIcons(); // fill the static [data-icon] buttons (titlebar / pane toolbars) with SVG
   { const av = $('#app-ver'); if (av) av.textContent = APP_VERSION; } // version label in the titlebar
-  makeEditor();
+  // вивер живёт в отдельном окне (module.html#files) — в редакторе его DOM/редактор больше нет.
   applyLayout();
   applyTheme();
   initGutters();
@@ -3221,21 +2238,18 @@ function init() {
 
   lite.pty.onData(({ id, data }) => {
     if (isExtTerm(id)) { const r = extTerms.get(id); if (r) r.term.write(data); return; }
-    if (isScratch(id)) { const r = scratchTerms.get(id); if (r) r.term.write(data); return; }
-    const rec = terms.get(id);
+    const rec = terms.get(id); // scratch-сессии маршрутизируются в своё окно (не приходят сюда)
     if (!rec) return;
     rec.term.write(data);
     markActivity(id, data);
   });
   lite.pty.onExit(({ id }) => {
     if (isExtTerm(id)) { const r = extTerms.get(id); if (r) r.term.write('\r\n\x1b[90m[шелл завершён]\x1b[0m\r\n'); return; }
-    if (isScratch(id)) { const r = scratchTerms.get(id); if (r) r.term.write('\r\n\x1b[90m[шелл завершён — ⟳ для нового]\x1b[0m\r\n'); return; }
     const rec = terms.get(id);
     if (rec) rec.term.write('\r\n\x1b[90m[процесс завершён — закрой и переоткрой проект]\x1b[0m\r\n');
     setProjState(id, 'quiet');
   });
   // RemoteHost — SSH-сессии (отдельный канал, не PTY): пишем вывод в соответствующий xterm.
-  Rh.bindEvents(); // поток данных/закрытие SSH-сессий → xterm-вкладки модуля
   // Пульт выбрал вкладку → синхронизируем активную на десктопе.
   try { if (lite.remote && lite.remote.onSelect) lite.remote.onSelect((sid) => { try { handleRemoteSelect(sid); } catch (_) {} }); } catch (_) {}
   // Пульт открыл терминал проекта → создаём вкладку на десктопе.
@@ -3245,7 +2259,7 @@ function init() {
   // Пульт: «Создать папку» → создаём на десктопе.
   try { if (lite.remote && lite.remote.onNewFolder) lite.remote.onNewFolder((name) => { try { handleRemoteNewFolder(name); } catch (_) {} }); } catch (_) {}
   try { if (lite.remote && lite.remote.onNoteToTerminal) lite.remote.onNoteToTerminal((projId, text) => { try { handleRemoteNoteToTerminal(projId, text); } catch (_) {} }); } catch (_) {}
-  try { if (lite.remote && lite.remote.onNotesChanged) lite.remote.onNotesChanged((id) => { try { Notes.onExternalChange(id); } catch (_) {} }); } catch (_) {}
+  try { if (lite.remote && lite.remote.onNotesChanged) lite.remote.onNotesChanged((id) => { try { lite.app.notesChanged(id); } catch (_) {} }); } catch (_) {}
   // Пульт просит одобрить устройство (pairing) → модалка одобрения.
   try { if (lite.remote && lite.remote.onPairRequest) lite.remote.onPairRequest((info) => { try { handleRemotePairRequest(info); } catch (_) {} }); } catch (_) {}
   // Бейдж «подключённые пульты» у версии: живёт на push-событиях из main + стартовый снимок.
@@ -3255,83 +2269,22 @@ function init() {
     if (lite.remote && lite.remote.pults) setTimeout(() => { refreshPults().catch(() => {}); }, 1500);
   } catch (_) {}
 
-  // OpenRouter streaming → SSE-события маршрутизирует модуль (по reqId).
-  Or.bindStream();
 
-  // Live disk changes for the active project: refresh tree (keeping expansion)
-  // and reload the open file — or warn if you have unsaved edits.
-  let fsTimer = null;
-  lite.fs.onChange(({ root, files }) => {
-    const p = activeProject();
-    if (!p || p.path !== root) return;
-    clearTimeout(fsTimer);
-    fsTimer = setTimeout(() => {
-      if (viewerOpen) renderTree(p);
-      if (currentFile && files.includes(currentFile)) {
-        if (diffMode) reloadCurrentDiff();              // в режиме диффа — обновляем дифф (редактор не трогаем)
-        else if (!dirty) reloadCurrentFile();           // нет правок — молча перечитываем (вивер всегда = диск)
-        else showReloadBar();                           // есть несохранённые правки — постоянная плашка-конфликт
-      }
-    }, 120);
-  });
+  // Live disk changes (fs:changed) теперь потребляет окно вивера (module-entry подписан на lite.fs.onChange).
+  // Редактор остаётся источником слежения (lite.fs.watch активного проекта в doSetActive), main рассылает
+  // событие и редактору, и окну вивера. В самом редакторе вивера/дерева больше нет — подписку убрали.
 
   $('#btn-single').addEventListener('click', toggleSingle);
-  $('#scratch-restart').addEventListener('click', () => restartScratch());
-  $('#scratch-close').addEventListener('click', () => setScratchOpen(false));
-  $('#viewer-save').addEventListener('click', saveCurrent);
-  $('#viewer-diff').addEventListener('click', toggleDiff);
-  $('#viewer-preview').addEventListener('click', togglePreview);
-  $('#viewer-full').addEventListener('click', togglePreviewFull);
-  $('#viewer-minimap').addEventListener('click', toggleMinimap);
-  $('#viewer-minimap').classList.toggle('on', settings.minimap);
-  $('#viewer-close').addEventListener('click', () => setViewerOpen(false));
-  $('#viewer-reload-apply').addEventListener('click', () => { hideReloadBar(); reloadCurrentFile(); });
-  $('#viewer-reload-dismiss').addEventListener('click', () => hideReloadBar());
-  $('#git-close').addEventListener('click', () => Git.setOpen(false));
-  $('#git-refresh').addEventListener('click', () => { if (Git.isOpen()) Git.renderPanel(activeProject()); });
-  $('#audit-close').addEventListener('click', () => Audit.setOpen(false));
-  $('#audit-rescan').addEventListener('click', () => Audit.rescan());
-  $('#tools-close').addEventListener('click', () => Tools.setOpen(false));
-  $('#iterflow-close').addEventListener('click', () => Iterflow.setOpen(false));
-  $('#iterflow-site').addEventListener('click', () => Iterflow.openSite());
-  $('#iterflow-refresh').addEventListener('click', () => Iterflow.refresh());
-  $('#iterflow-logout').addEventListener('click', () => Iterflow.logout());
-  $('#seo-close').addEventListener('click', () => Seo.setOpen(false));
-  $('#seo-rescan').addEventListener('click', () => Seo.rescan());
-  $('#notes-close').addEventListener('click', () => Notes.setOpen(false));
-  $('#notes-export').addEventListener('click', () => Notes.exportMenu());
-  $('#notes-import').addEventListener('click', () => Notes.importNotes());
-  $('#docker-close').addEventListener('click', () => Containers.setOpen(false));
-  $('#docker-refresh').addEventListener('click', () => Containers.refresh());
-  $('#db-close').addEventListener('click', () => Db.setOpen(false));
-  $('#db-refresh').addEventListener('click', () => Db.refresh());
-  $('#rh-close').addEventListener('click', () => Rh.setOpen(false));
-  $('#rh-refresh').addEventListener('click', () => { if (Rh.isOpen()) Rh.renderPanel(); });
-  $('#rh-back').addEventListener('click', () => Rh.goList());
-  $('#tree-refresh').addEventListener('click', () => { const p = activeProject(); if (p) renderTree(p); });
-  $('#tree-new').addEventListener('click', (e) => { const p = activeProject(); if (p) showTreeMenu(e.clientX, e.clientY, { name: p.name, path: p.path, dir: true, root: true }); });
-  $('#tree').addEventListener('contextmenu', (e) => {
-    if (e.target.closest('.tree-row')) return; // row menus handle their own
-    e.preventDefault();
-    const p = activeProject(); if (p) showTreeMenu(e.clientX, e.clientY, { name: p.name, path: p.path, dir: true, root: true });
-  });
-  // Корневая зона drop: пустая область дерева = корень проекта (строки-папки перехватывают событие сами).
-  $('#tree').addEventListener('dragover', (e) => {
-    const p = activeProject(); if (!p) return;
-    e.preventDefault(); e.stopPropagation();
-    e.dataTransfer.dropEffect = dragSrcPath ? 'move' : 'copy';
-    setDropHL(null); $('#tree').classList.add('drag-over-root');
-  });
-  $('#tree').addEventListener('dragleave', (e) => { if (e.target === $('#tree')) $('#tree').classList.remove('drag-over-root'); });
-  $('#tree').addEventListener('drop', (e) => {
-    const p = activeProject(); if (!p) return;
-    e.preventDefault(); e.stopPropagation();
-    handleTreeDrop(e, p.path);
-  });
-  // Страховка от залипшей подсветки: внешний drag из ОС не шлёт dragend, и если его бросили мимо/вне окна,
-  // рамка приёмника могла бы остаться. Снимаем её при выходе курсора за окно и на любом drop.
-  window.addEventListener('drop', clearDropHL);
-  document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) clearDropHL(); });
+  // scratch (системный терминал) живёт в окне модуля — кнопки привязывает module-entry.js.
+  // вивер+дерево (files) живут в окне модуля — их DOM/кнопки строит Files.mount() в module-entry.js.
+  // git живёт в окне модуля (module.html) — кнопки привязывает module-entry.js.
+  // doc (обработка текста) живёт в окне модуля — кнопки привязывает module-entry.js.
+  // tools/iterflow/seo/audit/notes живут в окнах модулей (module.html) — их кнопки привязывает module-entry.js.
+  // docker (контейнеры), db, rh (удалённые хосты) живут в окнах модулей — кнопки привязывает module-entry.js.
+  // Действия из окон модулей: «послать текст в терминал» обрабатывает редактор (терминалы тут); «открыть
+  // файл в вивере»/«обновить дерево» main маршрутизирует в окно вивера (не сюда).
+  lite.editorBus.onSendToTerminal((text) => { const p = activeProject(); if (p) sendNoteToTerminal(p, text); });
+  lite.editorBus.onSendNoteToTerminal((projId, text) => { const proj = projects.find((x) => x.id === projId) || activeProject(); if (proj) sendNoteToTerminal(proj, text); });
   $('#term-clear').addEventListener('click', () => clearTerminal());
   $('#term-restart').addEventListener('click', () => restartTerminal());
   $('#attention-badge').addEventListener('click', () => {
@@ -3349,12 +2302,11 @@ function init() {
   $('#term-search-prev').addEventListener('click', () => runTermSearch(-1));
   $('#term-search-close').addEventListener('click', closeTermSearch);
 
-  Or.bindControls(); // OpenRouter chat controls — слушатели панели чата (модуль)
+  // OpenRouter (чат) живёт в окне модуля — bindControls/bindStream вызывает module-entry.js.
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && document.body.classList.contains('preview-full')) { e.preventDefault(); exitPreviewFull(); return; }
+    // Esc-выход из полноэкранного превью и Ctrl+S сохранения файла живут в окне вивера (его keydown).
     if (e.ctrlKey && e.key === '\\') { e.preventDefault(); toggleSingle(); }
-    if (e.ctrlKey && e.code === 'KeyS') { e.preventDefault(); if (!(editor && editor.hasFocus)) saveCurrent(); }   // фокус в редакторе → его keymap Mod-s уже сохранит (без двойного вызова); e.code, не e.key — иначе в русской раскладке Ctrl+S → e.key='ы'
     if (e.ctrlKey && e.code === 'KeyK') { e.preventDefault(); showPalette(); }   // то же: Ctrl+K → e.key='л' в русской раскладке
     if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); bumpFont(1); }
     if (e.ctrlKey && e.key === '-') { e.preventDefault(); bumpFont(-1); }
@@ -3377,9 +2329,7 @@ function init() {
 
   let rezTimer;
   new ResizeObserver(() => { clearTimeout(rezTimer); rezTimer = setTimeout(() => refitActiveTerminal(), 80); }).observe($('#terminal-pane'));
-  let scratchRezTimer;
-  new ResizeObserver(() => { clearTimeout(scratchRezTimer); scratchRezTimer = setTimeout(() => refitScratch(), 80); }).observe($('#scratch-pane'));
-  let rhRezTimer; new ResizeObserver(() => { clearTimeout(rhRezTimer); rhRezTimer = setTimeout(() => Rh.refitSession(), 80); }).observe($('#rh-pane'));
+  // scratch/rh ресайз теперь в окнах модулей — обрабатывается module-entry.js.
 
   applyFontSize();
   projects = loadProjectsFromDisk();
@@ -3387,18 +2337,8 @@ function init() {
   if (projects.length) setActive(projects[0].id);
   else showActiveTerminal();
 
-  // Restore which panes were open last time (viewer / system terminal). grow:false —
-  // the saved window width already includes them, so reveal in place without resizing.
-  const ui = STORE.uiState || {};
-  // Right-slot modules are mutually exclusive — restore at most one, first-true-wins
-  // (приоритет — порядок старых if-цепочек: viewer, scratch, git, docker, db, rh).
-  // allowEmpty so Git returns even before a project is active — matching the viewer, so window width fits.
-  const RESTORE_ORDER = [['files', 'viewerOpen'], ['scratch', 'scratchOpen'], ['git', 'gitOpen'], ['ctx', 'ctxOpen'], ['docker', 'dockerOpen'], ['db', 'dbOpen'], ['rh', 'rhOpen'], ['notes', 'notesOpen'], ['audit', 'auditOpen'], ['iterflow', 'iterflowOpen'], ['seo', 'seoOpen'], ['tools', 'toolsOpen']];
-  for (const [id, key] of RESTORE_ORDER) {
-    if (!ui[key]) continue;
-    panels.get(id).setOpen(true, (id === 'git' || id === 'ctx' || id === 'notes' || id === 'audit' || id === 'iterflow') ? { grow: false, allowEmpty: true } : { grow: false });
-    break;
-  }
+  // Набор открытых окон модулей (включая вивер) восстанавливает main (moduleWins.__open) при старте —
+  // правому слоту редактора восстанавливать больше нечего (там остались только «Мои модули» по запросу).
 
   scanProjects();          // add subfolders of settings.scanDirs (non-blocking)
   checkProjectsExistence();

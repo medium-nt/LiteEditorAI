@@ -225,7 +225,7 @@ try {
   const legacy = path.join(os.homedir(), '.LiteEditor');
   if (!fs.existsSync(storeDir) && fs.existsSync(legacy)) fs.cpSync(legacy, storeDir, { recursive: true });
 } catch (_) {}
-const STORE_KEYS = ['projects', 'settings', 'layout', 'recents', 'lastParent', 'categories', 'sectionOrder', 'accordions', 'dismissed', 'uiState', 'projTabs', 'openrouter', 'remote', 'shares', 'pultBlocked', 'dockerUi', 'dbConnections', 'dbUi', 'rhConnections', 'rhUi', 'textproc', 'tpPrompts', 'extData', 'extEnabled', 'quickbar', 'seoTargets', 'seoSites'];
+const STORE_KEYS = ['projects', 'settings', 'layout', 'recents', 'lastParent', 'categories', 'sectionOrder', 'accordions', 'dismissed', 'uiState', 'projTabs', 'openrouter', 'remote', 'shares', 'pultBlocked', 'dockerUi', 'dbConnections', 'dbUi', 'rhConnections', 'rhUi', 'textproc', 'tpPrompts', 'extData', 'extEnabled', 'quickbar', 'seoTargets', 'seoSites', 'moduleWins'];
 // Папка-«стор» для шаринга с пультом (агент кладёт сюда файлы; в PTY доступна как $LITE_STORE).
 const pultStoreDir = path.join(storeDir, 'store');
 try { fs.mkdirSync(pultStoreDir, { recursive: true }); } catch (_) {}
@@ -320,7 +320,10 @@ const dbApi = dbBackend.registerDbIpc({
 // send() лениво ссылается на mainWindow (создаётся позже), вызывается только при живой сессии.
 const rhApi = rhBackend.registerRemoteIpc({
   ipcMain, safeStorage,
-  send: (ch, payload) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(ch, payload); },
+  // rh:data/rh:exit несут { id: sessionId } → маршрутизируем в окно-владельца сессии (редактор ИЛИ
+  // окно модуля «Удалённые хосты»); если владельца нет — фолбэк в окно редактора (sendToOwner).
+  send: (ch, payload) => sendToOwner(payload && payload.id, ch, payload),
+  onSessionOpen: (sessionId, sender) => { if (sessionId && sender) ownerBySession.set(sessionId, sender); },
   getConnections: () => readStoreKey('rhConnections'),
   setConnections: (v) => writeStoreKey('rhConnections', v),
 });
@@ -1259,6 +1262,9 @@ function createWindow() {
   mainWindow.on('resize', debounce(persist, 400));
   mainWindow.on('move', debounce(persist, 400));
   mainWindow.on('close', persist);
+  // Закрытие редактора закрывает все окна модулей (освобождение памяти). После этого
+  // window-all-closed штатно убивает PTY/db/rh и завершает приложение.
+  mainWindow.on('close', () => closeAllModuleWindows());
   mainWindow.on('maximize', () => mainWindow.webContents.send('win:maximized', true));
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('win:maximized', false));
 
@@ -1274,6 +1280,87 @@ function showWindow() {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+}
+
+// ---------------------------------------------------------------- module windows (v1.1+)
+// Каждый модуль (git/db/контейнеры/чат/…) живёт в ОТДЕЛЬНОМ окне, а не в правом слоте редактора.
+// Одно окно на тип модуля (повторный open = фокус). Окно помнит свои bounds (STORE.moduleWins[id]).
+// Закрытие редактора закрывает все окна модулей (освобождение памяти — отдельный процесс на окно).
+const moduleWindows = new Map();    // modId -> BrowserWindow
+let activeProjectInfo = null;       // {id,path,name,accent} — кэш активного проекта редактора (для проектозависимых окон)
+const ownerBySession = new Map();   // sessionId -> webContents — маршрутизация стримов по окну-владельцу (этап D)
+
+function readModuleWins() { const v = readStoreKey('moduleWins'); return (v && typeof v === 'object') ? v : {}; }
+function saveModuleBounds(modId, win) {
+  if (!win || win.isDestroyed()) return;
+  const all = readModuleWins();
+  if (win.isMaximized()) { all[modId] = { ...(all[modId] || {}), maximized: true }; }
+  else { const b = win.getBounds(); all[modId] = { x: b.x, y: b.y, width: b.width, height: b.height, maximized: false }; }
+  writeStoreKey('moduleWins', all);
+}
+function broadcastModuleOpenSet() {
+  const ids = [...moduleWindows.keys()];
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('module:openSet', { ids });
+  // запоминаем набор открытых окон — чтобы переоткрыть его при следующем запуске редактора
+  try { const all = readModuleWins(); all.__open = ids; writeStoreKey('moduleWins', all); } catch (_) {}
+}
+// Переоткрыть окна модулей, которые были открыты на момент прошлого выхода (с их сохранёнными bounds).
+function reopenSavedModuleWindows() {
+  try {
+    const open = readModuleWins().__open;
+    if (Array.isArray(open)) for (const id of open) { if (id && typeof id === 'string') openModuleWindow(id); }
+  } catch (_) {}
+}
+function broadcastToModules(ch, payload) {
+  for (const w of moduleWindows.values()) { if (w && !w.isDestroyed()) w.webContents.send(ch, payload); }
+}
+// Маршрут стрима к окну-владельцу сессии (fallback — главное окно редактора).
+function sendToOwner(sessionId, ch, payload) {
+  const wc = ownerBySession.get(sessionId);
+  if (wc && !wc.isDestroyed()) { wc.send(ch, payload); return; }
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(ch, payload);
+}
+function openModuleWindow(modId) {
+  const existing = moduleWindows.get(modId);
+  if (existing && !existing.isDestroyed()) { if (existing.isMinimized()) existing.restore(); existing.focus(); return; }
+  const saved = readModuleWins()[modId] || {};
+  const iconPng = path.join(__dirname, 'assets', 'icon.png');
+  const opts = {
+    width: saved.width || 900, height: saved.height || 700,
+    minWidth: 420, minHeight: 320,
+    backgroundColor: '#00000000', frame: false, transparent: true,
+    title: 'LiteEditorAI', show: false,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
+  };
+  if (Number.isInteger(saved.x) && Number.isInteger(saved.y)) { opts.x = saved.x; opts.y = saved.y; }
+  if (fs.existsSync(iconPng)) opts.icon = iconPng;
+  const win = new BrowserWindow(opts);
+  moduleWindows.set(modId, win);
+  win.loadFile(path.join(__dirname, 'renderer', 'module.html'), { hash: modId });
+  if (saved.maximized) win.maximize();
+  win.once('ready-to-show', () => { if (!win.isDestroyed()) win.show(); });
+  win.on('maximize', () => { if (!win.isDestroyed()) win.webContents.send('win:maximized', true); });
+  win.on('unmaximize', () => { if (!win.isDestroyed()) win.webContents.send('win:maximized', false); });
+  win.on('resize', debounce(() => saveModuleBounds(modId, win), 400));
+  win.on('move', debounce(() => saveModuleBounds(modId, win), 400));
+  win.on('close', () => saveModuleBounds(modId, win));
+  win.on('closed', () => {
+    moduleWindows.delete(modId);
+    if (modId === 'files') filesViewerReady = false; // окно вивера закрыто → следующее openInViewer переоткроет и переждёт готовность
+    for (const [sid, wc] of ownerBySession) { try { if (wc.isDestroyed()) ownerBySession.delete(sid); } catch (_) { ownerBySession.delete(sid); } }
+    broadcastModuleOpenSet();
+  });
+  win.webContents.on('render-process-gone', (_e, d) => logger.log('error', 'module-window', `${modId} ${JSON.stringify(d)}`));
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (input.key === 'F12') win.webContents.toggleDevTools();
+    if (input.key === 'F11') win.setFullScreen(!win.isFullScreen());
+  });
+  broadcastModuleOpenSet();
+}
+function closeAllModuleWindows() {
+  for (const w of [...moduleWindows.values()]) { try { if (w && !w.isDestroyed()) w.destroy(); } catch (_) {} }
+  moduleWindows.clear();
 }
 
 // Tray gives a quick way back to the window and surfaces how many agents need
@@ -1304,6 +1391,9 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null); // we draw our own menu in the custom titlebar
   createWindow();
   createTray();
+  // Переоткрыть окна модулей, открытые в прошлой сессии (проектозависимые подхватят активный
+  // проект, когда редактор его запушит). Небольшая задержка — дать окну редактора подняться.
+  setTimeout(reopenSavedModuleWindows, 600);
   startRemotePult();
   signalHeirReady();   // если нас запустили как «наследника» при перезагрузке с пульта — отрапортовать старой копии
   app.on('activate', () => {
@@ -1687,15 +1777,52 @@ app.on('window-all-closed', () => {
 });
 
 // ---------------------------------------------------------------- window controls
-ipcMain.on('win:minimize', () => mainWindow && mainWindow.minimize());
-ipcMain.on('win:maximizeToggle', () => {
-  if (!mainWindow) return;
-  if (mainWindow.isMaximized()) mainWindow.unmaximize();
-  else mainWindow.maximize();
+// Действуют на окно ОТПРАВИТЕЛЯ (редактор ИЛИ окно модуля), не на mainWindow жёстко.
+function senderWin(e) { try { return BrowserWindow.fromWebContents(e.sender); } catch (_) { return null; } }
+ipcMain.on('win:minimize', (e) => { const w = senderWin(e); if (w) w.minimize(); });
+ipcMain.on('win:maximizeToggle', (e) => {
+  const w = senderWin(e);
+  if (!w) return;
+  if (w.isMaximized()) w.unmaximize();
+  else w.maximize();
 });
-ipcMain.on('win:close', () => mainWindow && mainWindow.close());
-ipcMain.handle('win:isMaximized', () => !!(mainWindow && mainWindow.isMaximized()));
+ipcMain.on('win:close', (e) => { const w = senderWin(e); if (w) w.close(); });
+ipcMain.handle('win:isMaximized', (e) => { const w = senderWin(e); return !!(w && w.isMaximized()); });
 ipcMain.on('win:show', showWindow);
+
+// ── Окна модулей: open/close/реестр открытых ──────────────────────────────────────────
+ipcMain.on('module:open', (_e, { modId } = {}) => { if (modId) openModuleWindow(String(modId)); });
+ipcMain.on('module:close', (_e, { modId } = {}) => { const w = moduleWindows.get(String(modId)); if (w && !w.isDestroyed()) w.close(); });
+ipcMain.handle('module:openSet', () => ({ ids: [...moduleWindows.keys()] }));
+
+// ── Кросс-оконная шина: активный проект редактора → окна модулей ──────────────────────
+ipcMain.on('app:setActiveProject', (_e, info) => { activeProjectInfo = info || null; broadcastToModules('app:activeProject', activeProjectInfo); });
+ipcMain.handle('app:getActiveProject', () => activeProjectInfo);
+ipcMain.on('app:settingsChanged', (_e, s) => broadcastToModules('app:settingsChanged', s || {}));
+ipcMain.on('app:notesChanged', (_e, { id } = {}) => broadcastToModules('app:notesChanged', { id }));
+
+// ── Действия из окна модуля → переслать редактору (терминал) или окну вивера (файл/дерево) ──
+function forwardToEditor(ch, payload) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(ch, payload); }
+// Вивер живёт в окне модуля «files». openInViewer/refreshTree маршрутизируем туда (открываем окно при
+// необходимости). Окно может быть не готово принять сообщение сразу после открытия → копим в очередь до
+// сигнала editor:viewerReady (его шлёт module-entry после подписки).
+let filesViewerReady = false;
+const pendingViewerOpens = [];
+function filesWindow() { const w = moduleWindows.get('files'); return (w && !w.isDestroyed()) ? w : null; }
+function routeOpenInViewer(payload) {
+  if (!filesWindow()) openModuleWindow('files'); // откроет окно (и переключит на активный проект)
+  const w = filesWindow();
+  if (w && filesViewerReady) w.webContents.send('editor:openInViewer', payload);
+  else pendingViewerOpens.push(payload); // флашнем по editor:viewerReady
+}
+ipcMain.on('editor:openInViewer', (_e, payload) => routeOpenInViewer(payload));
+ipcMain.on('editor:refreshTree', (_e, payload) => { const w = filesWindow(); if (w) w.webContents.send('editor:refreshTree', payload); });
+ipcMain.on('editor:viewerReady', () => {
+  filesViewerReady = true;
+  while (pendingViewerOpens.length) { const p = pendingViewerOpens.shift(); const w = filesWindow(); if (w) w.webContents.send('editor:openInViewer', p); }
+});
+ipcMain.on('editor:sendToTerminal', (_e, payload) => forwardToEditor('editor:sendToTerminal', payload));
+ipcMain.on('editor:sendNoteToTerminal', (_e, payload) => forwardToEditor('editor:sendNoteToTerminal', payload));
 
 // Reflect how many agents need attention on the tray tooltip (and macOS title).
 ipcMain.on('tray:update', (_e, { attention } = {}) => {
@@ -1706,8 +1833,11 @@ ipcMain.on('tray:update', (_e, { attention } = {}) => {
 
 // Grow/shrink the window to the right by dx px (used when the viewer opens, so
 // the terminal keeps its size instead of being squished).
-ipcMain.on('win:growBy', (_e, { dx }) => {
-  if (!mainWindow || mainWindow.isFullScreen() || mainWindow.isMaximized()) return;
+ipcMain.on('win:growBy', (e, { dx }) => {
+  // growBy растягивает ТОЛЬКО окно редактора (правый слот). В окнах модулей панель занимает всё окно,
+  // поэтому их вызовы growBy (напр. из setOpen(false) модуля) — no-op, чтобы не двигать окно редактора.
+  if (!mainWindow || senderWin(e) !== mainWindow) return;
+  if (mainWindow.isFullScreen() || mainWindow.isMaximized()) return;
   const b = mainWindow.getBounds();
   const work = screen.getDisplayMatching(b).workArea;
   // Accumulate the request in a virtual width (unclamped) so a clamped grow + full shrink
@@ -1747,7 +1877,10 @@ ipcMain.handle('dialog:pickDir', async () => {
 });
 
 // ---------------------------------------------------------------- PTY
-function spawnPtyFor(id, cwd, cols, rows) {
+// owner = webContents окна, создавшего сессию (редактор для терминалов проектов, окно «Система · ~»
+// для scratch). Данные/выход маршрутизируем владельцу (sendToOwner; фолбэк — окно редактора).
+function spawnPtyFor(id, cwd, cols, rows, owner) {
+  if (owner) ownerBySession.set(id, owner);
   const { file: shell, args: shellArgs } = resolveShell();
   const startCwd = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
   // Log around the spawn: it runs synchronously on the main thread, so if it ever
@@ -1766,16 +1899,14 @@ function spawnPtyFor(id, cwd, cols, rows) {
     });
   } catch (err) {
     logger.log('error', 'pty', 'spawn failed', err);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('pty:data', { id, data: `\r\n\x1b[31mНе удалось запустить шелл (${shell}): ${err.message}\x1b[0m\r\n` });
-      mainWindow.webContents.send('pty:exit', { id });
-    }
+    sendToOwner(id, 'pty:data', { id, data: `\r\n\x1b[31mНе удалось запустить шелл (${shell}): ${err.message}\x1b[0m\r\n` });
+    sendToOwner(id, 'pty:exit', { id });
     return { error: String(err.message || err) };
   }
   logger.log('info', 'pty', `spawned pid=${proc.pid}`);
   mirrorCreate(id, cols, rows);   // свежий теневой терминал (сбрасывает scrollback при рестарте PTY)
   proc.onData((data) => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pty:data', { id, data });
+    sendToOwner(id, 'pty:data', { id, data });     // окну-владельцу (редактор/scratch-окно)
     mirrorWrite(id, data);                         // сначала в теневой терминал (кадр всегда консистентен)
     try { remote.screenTouch(id); } catch (_) {}   // потом будим диффер кадров (debounce внутри)
   });
@@ -1784,24 +1915,24 @@ function spawnPtyFor(id, cwd, cols, rows) {
     ptys.delete(id);
     ptySize.delete(id);
     mirrorDispose(id);
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pty:exit', { id });
+    sendToOwner(id, 'pty:exit', { id });
     try { remote.exit(id); remote.notifyState(); } catch (_) {}
   });
   ptys.set(id, proc);
   ptySize.set(id, { cols: cols || 80, rows: rows || 24 });
   return { ok: true };
 }
-ipcMain.handle('pty:create', (_e, { id, cwd, cols, rows }) => {
-  if (ptys.has(id)) return { ok: true, existed: true };
-  const r = spawnPtyFor(id, cwd, cols, rows);
+ipcMain.handle('pty:create', (e, { id, cwd, cols, rows }) => {
+  if (ptys.has(id)) { ownerBySession.set(id, e.sender); return { ok: true, existed: true }; }
+  const r = spawnPtyFor(id, cwd, cols, rows, e.sender);
   try { remote.notifyState(); } catch (_) {} // обновить список вкладок на пульте
   return r;
 });
 // Kill the existing PTY (if any) and start a fresh one in the same cwd.
-ipcMain.handle('pty:restart', (_e, { id, cwd, cols, rows }) => {
+ipcMain.handle('pty:restart', (e, { id, cwd, cols, rows }) => {
   const old = ptys.get(id);
   if (old) { try { old.kill(); } catch (_) {} ptys.delete(id); }
-  return spawnPtyFor(id, cwd, cols, rows);
+  return spawnPtyFor(id, cwd, cols, rows, e.sender);
 });
 ipcMain.on('pty:write', (_e, { id, data }) => { const p = ptys.get(id); if (p) p.write(data); });
 ipcMain.on('pty:resize', (_e, { id, cols, rows }) => {
@@ -1959,6 +2090,7 @@ ipcMain.on('fs:watch', (_e, root) => {
     rec.timer = setTimeout(() => {
       const files = [...rec.pending]; rec.pending.clear();
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fs:changed', { root, files });
+      const fw = filesWindow(); if (fw) fw.webContents.send('fs:changed', { root, files }); // окно вивера обновляет дерево/файл
     }, 180);
   });
   watchers.set(root, rec);
@@ -3170,30 +3302,32 @@ ipcMain.handle('containers:bulk', async (_e, { engine, action, ids } = {}) => {
 // --- container logs (streamed) and interactive exec (PTY) for the detail view
 const cLogProcs = new Map();  // streamId -> ChildProcess (logs -f)
 const cExecPtys = new Map();  // execId   -> IPty (exec -it)
-ipcMain.handle('containers:logsStart', (_e, { engine, id, streamId, tail } = {}) => {
+ipcMain.handle('containers:logsStart', (e, { engine, id, streamId, tail } = {}) => {
   if (engine !== 'docker' && engine !== 'podman') return { error: 'bad engine' };
   if (!id || !streamId) return { error: 'bad args' };
   let cp;
   try { cp = spawn(engine, ['logs', '-f', '--tail', String(Math.max(1, Math.min(5000, parseInt(tail, 10) || 500))), id], { windowsHide: true }); }
-  catch (e) { return { error: String(e.message || e) }; }
-  const send = (d) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('containers:logsData', { streamId, data: d.toString('utf8') }); };
+  catch (e2) { return { error: String(e2.message || e2) }; }
+  const sender = e.sender; // окно-владелец (редактор ИЛИ окно модуля «Контейнеры») — стрим уходит туда
+  const send = (d) => safeSend(sender, 'containers:logsData', { streamId, data: d.toString('utf8') });
   cp.stdout.on('data', send); cp.stderr.on('data', send);
   cp.on('error', (err) => send('\n[ошибка logs: ' + (err.message || err) + ']\n'));
-  cp.on('close', () => { cLogProcs.delete(streamId); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('containers:logsExit', { streamId }); });
+  cp.on('close', () => { cLogProcs.delete(streamId); safeSend(sender, 'containers:logsExit', { streamId }); });
   cLogProcs.set(streamId, cp);
   return { ok: true };
 });
 ipcMain.on('containers:logsStop', (_e, { streamId } = {}) => { const cp = cLogProcs.get(streamId); if (cp) { try { cp.kill(); } catch (_) {} cLogProcs.delete(streamId); } });
-ipcMain.handle('containers:execStart', (_e, { engine, id, execId, cols, rows } = {}) => {
+ipcMain.handle('containers:execStart', (e, { engine, id, execId, cols, rows } = {}) => {
   if (engine !== 'docker' && engine !== 'podman') return { error: 'bad engine' };
   if (!id || !execId) return { error: 'bad args' };
   let proc;
   try {
     proc = pty.spawn(engine, ['exec', '-it', id, 'sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash || exec sh'],
       { name: 'xterm-color', cols: cols || 80, rows: rows || 24, env: process.env });
-  } catch (e) { return { error: String(e.message || e) }; }
-  proc.onData((d) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('containers:execData', { execId, data: d }); });
-  proc.onExit(() => { cExecPtys.delete(execId); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('containers:execExit', { execId }); });
+  } catch (e2) { return { error: String(e2.message || e2) }; }
+  const sender = e.sender; // окно-владелец exec-терминала
+  proc.onData((d) => safeSend(sender, 'containers:execData', { execId, data: d }));
+  proc.onExit(() => { cExecPtys.delete(execId); safeSend(sender, 'containers:execExit', { execId }); });
   cExecPtys.set(execId, proc);
   return { ok: true };
 });

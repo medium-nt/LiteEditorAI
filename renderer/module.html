@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' file: blob:; img-src 'self' data: file: https: http:; frame-src 'self' file:;" />
+  <title>LiteEditorAI — модуль</title>
+  <link rel="stylesheet" href="dist/module-bundle.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-theme="neumorphism" class="module-window">
+  <!-- Окно одного модуля (v1.1+): титлбар + единственная панель, которая заполняет окно. -->
+  <div id="mod-app">
+    <header id="mod-topbar">
+      <span class="brand"><span class="brand-mark">▍</span><span id="mod-brand-title">Модуль</span></span>
+      <div class="drag-space"></div>
+      <div class="win-tools">
+        <button id="win-min" class="win-btn" title="Свернуть" aria-label="Свернуть"></button>
+        <button id="win-max" class="win-btn" title="Развернуть" aria-label="Развернуть"></button>
+        <button id="win-close" class="win-btn close" title="Закрыть" aria-label="Закрыть"></button>
+      </div>
+    </header>
+
+    <!-- Скелеты панелей модулей переезжают сюда из index.html (по одному модулю на окно). -->
+    <div id="module-root">
+      <!-- Системный терминал: свой PTY в домашней папке, вкладки независимых шеллов -->
+      <div id="gutter-scratch" class="gutter gutter-scratch hidden" data-resize="scratch"></div>
+      <section id="scratch-pane" class="hidden">
+        <div class="pane-head">
+          <span>СИСТЕМА · ~</span>
+          <div class="drag-space-static"></div>
+          <button id="scratch-restart" class="icon-btn" title="Перезапустить активную вкладку (новый шелл в ~)" data-icon="refresh"></button>
+          <button id="scratch-close" class="icon-btn" title="Закрыть модуль" data-icon="x"></button>
+        </div>
+        <div id="scratch-tabs" class="term-tabs scratch-tabs"></div>
+        <div id="scratch-term"></div>
+      </section>
+      <!-- OpenRouter chat: чат по своим API-ключам (самостоятельный) -->
+      <div id="gutter-chat" class="gutter hidden" data-resize="chat"></div>
+      <section id="chat-pane" class="hidden">
+        <div class="pane-head">
+          <span id="chat-title" class="chat-title">OpenRouter</span>
+          <div class="drag-space-static"></div>
+          <button id="chat-keys" class="icon-btn" title="Управление ключами" data-icon="sliders"></button>
+          <button id="chat-close" class="icon-btn" title="Закрыть" data-icon="x"></button>
+        </div>
+        <div id="chat-tabs" class="chat-tabs"></div><!-- вкладка на каждый ключ (рендерит openrouter.js) -->
+        <div id="chat-top">
+          <div id="chat-session-wrap" class="chat-session-wrap">
+            <button id="chat-session-btn" class="chat-session-btn" type="button" title="Сессии этого ключа">☰ Сессия 1</button>
+            <div id="chat-session-pop" class="chat-session-pop hidden"></div>
+          </div>
+          <div id="chat-model-wrap" class="chat-model-wrap">
+            <button id="chat-model-btn" class="chat-model-btn" type="button">Выбрать модель…</button>
+            <div id="chat-model-pop" class="chat-model-pop hidden">
+              <input id="chat-model-search" type="text" placeholder="Поиск модели…" autocomplete="off" spellcheck="false">
+              <div id="chat-model-list" class="chat-model-list"></div>
+            </div>
+          </div>
+          <div class="chat-ctx" title="Сколько последних сообщений отправлять модели (1–100)">
+            <label for="chat-ctx-input">контекст</label>
+            <input id="chat-ctx-input" type="number" min="1" max="100" value="10">
+          </div>
+          <span id="chat-usage" class="or-usage-text chat-usage" title="Баланс активного ключа"></span>
+          <button id="chat-usage-refresh" class="or-refresh" title="Обновить баланс ключа" data-icon="refresh" data-icon-size="13"></button>
+        </div>
+        <div id="chat-log" class="chat-log"></div>
+        <div id="chat-input-row" class="chat-input-row">
+          <textarea id="chat-input" rows="1" placeholder="Сообщение…  (Enter — отправить, Shift+Enter — перенос строки)" spellcheck="false"></textarea>
+          <button id="chat-send" class="btn primary chat-send" type="button" title="Отправить">▶</button>
+        </div>
+      </section>
+
+      <!-- Обработка текста: документы + AI-правки фрагментов (renderer/modules/textproc.js) -->
+      <div id="gutter-doc" class="gutter hidden" data-resize="doc"></div>
+      <section id="doc-pane" class="hidden">
+        <div class="pane-head">
+          <span id="doc-title" class="doc-title">Обработка текста</span>
+          <div class="drag-space-static"></div>
+          <span id="doc-saved" class="doc-saved"></span>
+          <button id="doc-settings" class="icon-btn" title="Промпты и агент" data-icon="sliders"></button>
+          <button id="doc-close" class="icon-btn" title="Закрыть" data-icon="x"></button>
+        </div>
+        <div id="doc-tabs" class="doc-tabs"></div><!-- вкладка на каждый документ (рендерит textproc.js) -->
+        <div id="doc-toolbar">
+          <div id="doc-modes" class="doc-modes"></div>
+        </div>
+        <div id="doc-body" class="doc-body">
+          <div id="doc-editor" class="doc-editor"></div>
+          <div id="doc-preview" class="doc-preview prev-md" style="display:none"></div>
+          <button id="doc-ai-btn" class="doc-ai-btn" type="button" style="display:none">✦ AI</button>
+        </div>
+      </section>
+
+      <!-- «Контекст» module: per-project граф контекста агента (канва как n8n) -->
+      <div id="gutter-ctx" class="gutter hidden" data-resize="ctx"></div>
+      <section id="ctx-pane" class="hidden">
+        <div class="pane-head">
+          <span id="ctx-title">Контекст</span>
+          <span id="ctx-stale" class="ctx-stale" title="Есть неподтверждённые изменения — нажми «Подтвердить»" hidden>●</span>
+          <button id="ctx-extern" class="ctx-extern" title="Файл изменён вне модуля (вероятно, агентом) — посмотреть и втянуть правки" hidden>⚠ файл изменён вне модуля</button>
+          <div class="drag-space-static"></div>
+          <button id="ctx-help" class="icon-btn" title="Как это работает?" data-icon="help"></button>
+          <button id="ctx-settings" class="icon-btn" title="Настройки (бекапы, автосборка)" data-icon="sliders"></button>
+          <button id="ctx-close" class="icon-btn" title="Закрыть" data-icon="x"></button>
+        </div>
+        <div id="ctx-agents" class="ctx-agents"></div><!-- переключатель агента (Claude/Codex): рендерится в contextgraph.js -->
+        <div id="ctx-profiles" class="ctx-profiles"></div><!-- вкладки-профили текущего агента -->
+        <div id="ctx-stats" class="ctx-stats"></div>
+        <div id="ctx-canvas" class="ctx-canvas">
+          <!-- плавающая панель действий профиля/канвы (поверх канвы, правый верхний угол) -->
+          <div id="ctx-toolbar" class="ctx-toolbar">
+            <div class="ctx-tb-row">
+              <button id="ctx-add" class="icon-btn" title="Добавить блок" data-icon="plus"></button>
+              <button id="ctx-group" class="icon-btn" title="Сгруппировать выделенные блоки (Ctrl+G)" data-icon="layers" hidden></button>
+              <button id="ctx-fit" class="icon-btn" title="Уместить всё в экран" data-icon="maximize"></button>
+              <button id="ctx-points" class="icon-btn ctx-tb-emoji" title="Версии (точки восстановления)">🕘</button>
+            </div>
+            <div id="ctx-tb-actions" class="ctx-tb-row ctx-tb-actions" hidden>
+              <button id="ctx-reset" class="icon-btn" title="Сбросить неподтверждённые изменения — вернуть канву к последнему подтверждённому виду" data-icon="refresh" hidden></button>
+              <button id="ctx-apply" class="icon-btn ctx-apply-btn" title="Подтвердить изменения: сохранить канву и собрать файл агента (с бекапом)" data-icon="check" hidden></button>
+            </div>
+          </div>
+          <button id="ctx-wire-del" class="ctx-wire-del" title="Удалить соединение" hidden>×</button><!-- появляется при наведении на провод -->
+          <div id="ctx-marquee" class="ctx-marquee" hidden></div><!-- рамка выделения (Shift+протягивание) -->
+          <div id="ctx-world" class="ctx-world">
+            <svg id="ctx-wires" class="ctx-wires"></svg>
+            <div id="ctx-nodes"></div>
+          </div>
+          <!-- лёгкий онбординг: нижняя плашка, закрывается один раз; основное управление — в тулбаре справа сверху -->
+          <div id="ctx-onboard" class="ctx-onboard" hidden>
+            <div class="ctx-onboard-tx"><b>Контекст агента из блоков.</b> Стартовый блок — это весь файл агента. Наведи на него курсор и нажми <b>✂</b> (или кнопку ниже), чтобы разложить его на блоки по заголовкам. Дальше: «+» добавить блок, 🕘 версии, выделить блоки и сгруппировать.</div>
+            <button id="ctx-ob-split" class="btn primary">✂ Распилить файл</button>
+            <button id="ctx-ob-help" class="btn">Как это работает</button>
+            <button id="ctx-ob-close" class="icon-btn" title="Скрыть подсказку" data-icon="x"></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Git module: репозиторий активного проекта (следует за активным проектом редактора) -->
+      <div id="gutter-git" class="gutter hidden" data-resize="git"></div>
+      <section id="git-pane" class="hidden">
+        <div class="pane-head">
+          <span id="git-proj">Git</span>
+          <div class="drag-space-static"></div>
+          <button id="git-refresh" class="icon-btn" title="Обновить" data-icon="refresh"></button>
+          <button id="git-close" class="icon-btn" title="Закрыть Git" data-icon="x"></button>
+        </div>
+        <div id="git-body" class="git-body"></div>
+      </section>
+
+      <!-- Containers module (docker/podman): system-wide -->
+      <div id="gutter-docker" class="gutter hidden" data-resize="docker"></div>
+      <section id="docker-pane" class="hidden">
+        <div class="pane-head">
+          <span id="docker-title">Контейнеры</span>
+          <div class="drag-space-static"></div>
+          <button id="docker-refresh" class="icon-btn" title="Обновить" data-icon="refresh"></button>
+          <button id="docker-close" class="icon-btn" title="Закрыть" data-icon="x"></button>
+        </div>
+        <div id="docker-tabs" class="docker-tabs"></div>
+        <div id="docker-body" class="docker-body"></div>
+      </section>
+
+      <!-- RemoteHost module (SSH-сессии к серверам/хостингам): system-wide -->
+      <div id="gutter-rh" class="gutter hidden" data-resize="rh"></div>
+      <section id="rh-pane" class="hidden">
+        <div class="pane-head">
+          <span id="rh-title">Удалённые хосты</span>
+          <div class="drag-space-static"></div>
+          <button id="rh-back" class="icon-btn" title="К списку подключений" data-icon="chevron-left" style="display:none"></button>
+          <button id="rh-refresh" class="icon-btn" title="Обновить список" data-icon="refresh"></button>
+          <button id="rh-close" class="icon-btn" title="Закрыть модуль" data-icon="x"></button>
+        </div>
+        <div id="rh-tabs" class="term-tabs rh-tabs" style="display:none"></div>
+        <div id="rh-conns" class="db-body"></div>
+        <div id="rh-term" style="display:none"></div>
+      </section>
+
+      <!-- Databases module (Postgres/MySQL/SQLite): system-wide -->
+      <div id="gutter-db" class="gutter hidden" data-resize="db"></div>
+      <section id="db-pane" class="hidden">
+        <div class="pane-head">
+          <span id="db-title">Базы данных</span>
+          <div class="drag-space-static"></div>
+          <button id="db-refresh" class="icon-btn" title="Обновить" data-icon="refresh"></button>
+          <button id="db-close" class="icon-btn" title="Закрыть" data-icon="x"></button>
+        </div>
+        <div id="db-body" class="db-body"></div>
+      </section>
+
+      <!-- Notes/tasks module: задачи активного проекта + общие (следует за активным проектом редактора) -->
+      <div id="gutter-notes" class="gutter hidden" data-resize="notes"></div>
+      <section id="notes-pane" class="hidden">
+        <div class="pane-head">
+          <span id="notes-proj">Задачи</span>
+          <div class="drag-space-static"></div>
+          <button id="notes-export" class="icon-btn" title="Экспорт заметок в JSON" data-icon="download"></button>
+          <button id="notes-import" class="icon-btn" title="Импорт заметок из JSON" data-icon="upload"></button>
+          <button id="notes-close" class="icon-btn" title="Закрыть" data-icon="x"></button>
+        </div>
+        <div id="notes-body" class="notes-body"></div>
+      </section>
+
+      <!-- Audit module: базовый аудит активного проекта (следует за активным проектом редактора) -->
+      <div id="gutter-audit" class="gutter hidden" data-resize="audit"></div>
+      <section id="audit-pane" class="hidden">
+        <div class="pane-head">
+          <span id="audit-proj">Аудит проекта</span>
+          <div class="drag-space-static"></div>
+          <button id="audit-rescan" class="icon-btn" title="Пересканировать проект" data-icon="refresh"></button>
+          <button id="audit-close" class="icon-btn" title="Закрыть" data-icon="x"></button>
+        </div>
+        <div id="audit-body" class="audit-body"></div>
+      </section>
+      <!-- Tools module: devtools-комбайн (base64/JSON↔YAML/хэши/JWT/regex/diff…) -->
+      <div id="gutter-tools" class="gutter hidden" data-resize="tools"></div>
+      <section id="tools-pane" class="hidden">
+        <div class="pane-head">
+          <span>Инструменты</span>
+          <div class="drag-space-static"></div>
+          <button id="tools-close" class="icon-btn" title="Закрыть" data-icon="x"></button>
+        </div>
+        <div id="tools-body" class="tools-body"></div>
+      </section>
+
+      <!-- IterFlow module: таск-трекер исполнителя (отдельный продукт через /api/editor/*) -->
+      <div id="gutter-iterflow" class="gutter hidden" data-resize="iterflow"></div>
+      <section id="iterflow-pane" class="hidden">
+        <div class="pane-head">
+          <span id="iterflow-proj">IterFlow</span>
+          <div class="drag-space-static"></div>
+          <button id="iterflow-site" class="icon-btn" title="Открыть сайт IterFlow" data-icon="globe"></button>
+          <button id="iterflow-refresh" class="icon-btn" title="Обновить" data-icon="refresh"></button>
+          <button id="iterflow-logout" class="icon-btn" title="Выйти из IterFlow" data-icon="logout"></button>
+          <button id="iterflow-close" class="icon-btn" title="Закрыть" data-icon="x"></button>
+        </div>
+        <div id="iterflow-body" class="iterflow-body"></div>
+      </section>
+
+      <!-- WEB/SEO audit module: аудит сайта (локальный dev-сервер или внешний домен) -->
+      <div id="gutter-seo" class="gutter hidden" data-resize="seo"></div>
+      <section id="seo-pane" class="hidden">
+        <div class="pane-head">
+          <span id="seo-proj">WEB/SEO аудит</span>
+          <div class="drag-space-static"></div>
+          <button id="seo-rescan" class="icon-btn" title="Пересканировать сайт" data-icon="refresh"></button>
+          <button id="seo-close" class="icon-btn" title="Закрыть" data-icon="x"></button>
+        </div>
+        <div id="seo-body" class="seo-body"></div>
+      </section>
+
+      <!-- Files module: вивер кода (CodeMirror) + дерево файлов (следует за активным проектом редактора).
+           Две панели в одном окне: вивер заполняет, дерево — боковая колонка (CSS body.mw-files ниже). -->
+      <section id="viewer-pane" class="hidden">
+        <div class="pane-head">
+          <span id="viewer-filename">—</span>
+          <span id="viewer-dirty" class="dirty-dot" title="Несохранённые изменения"></span>
+          <div class="drag-space-static"></div>
+          <button id="viewer-minimap" class="icon-btn" title="Миникарта кода (вкл/выкл)" data-icon="columns"></button>
+          <button id="viewer-preview" class="icon-btn" title="Превью (Markdown / картинка / HTML)" data-icon="eye"></button>
+          <button id="viewer-full" class="icon-btn" title="Развернуть превью HTML на весь экран (Esc — выход)" style="display:none" data-icon="maximize"></button>
+          <button id="viewer-diff" class="icon-btn" title="Дифф изменений vs HEAD (git)" data-icon="diff"></button>
+          <button id="viewer-save" class="icon-btn" title="Сохранить (Ctrl+S)" data-icon="save"></button>
+          <button id="viewer-close" class="icon-btn" title="Закрыть окно" data-icon="x"></button>
+        </div>
+        <div id="viewer-reload-bar" class="reload-bar hidden">
+          <span class="reload-bar-text">Файл изменён на диске, а у вас есть несохранённые правки.</span>
+          <button id="viewer-reload-apply" class="reload-bar-btn">Перечитать с диска</button>
+          <button id="viewer-reload-dismiss" class="icon-btn" title="Оставить мои правки" data-icon="x"></button>
+        </div>
+        <div id="editor"></div>
+        <div id="diff-view"></div>
+        <div id="preview-view"></div>
+      </section>
+      <section id="tree-pane" class="hidden">
+        <div class="pane-head">
+          <span id="tree-title">ДЕРЕВО</span>
+          <div class="drag-space-static"></div>
+          <button id="tree-new" class="icon-btn" title="Создать файл/папку в корне проекта" data-icon="plus"></button>
+          <button id="tree-refresh" class="icon-btn" title="Обновить дерево файлов" data-icon="refresh"></button>
+        </div>
+        <div id="tree"></div>
+      </section>
+    </div>
+  </div>
+
+  <div id="menu-layer"></div>
+  <div id="modal-root"></div>
+  <div id="toasts"></div>
+
+  <script src="dist/module-bundle.js"></script>
+</body>
+</html>
