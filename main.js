@@ -225,7 +225,7 @@ try {
   const legacy = path.join(os.homedir(), '.LiteEditor');
   if (!fs.existsSync(storeDir) && fs.existsSync(legacy)) fs.cpSync(legacy, storeDir, { recursive: true });
 } catch (_) {}
-const STORE_KEYS = ['projects', 'settings', 'layout', 'recents', 'lastParent', 'categories', 'sectionOrder', 'accordions', 'dismissed', 'uiState', 'projTabs', 'openrouter', 'remote', 'shares', 'pultBlocked', 'dockerUi', 'dbConnections', 'dbUi', 'rhConnections', 'rhUi', 'textproc', 'tpPrompts', 'extData', 'extEnabled', 'quickbar', 'seoTargets', 'seoSites', 'moduleWins', 'mwLeft', 'bookmarks', 'promptSnippets', 'pomodoro', 'pomodoroLog', 'dbaiProviders'];
+const STORE_KEYS = ['projects', 'settings', 'layout', 'recents', 'lastParent', 'categories', 'sectionOrder', 'accordions', 'dismissed', 'uiState', 'projTabs', 'openrouter', 'remote', 'shares', 'pultBlocked', 'dockerUi', 'dbConnections', 'dbUi', 'rhConnections', 'rhUi', 'textproc', 'tpPrompts', 'extData', 'extEnabled', 'quickbar', 'seoTargets', 'seoSites', 'moduleWins', 'mwLeft', 'bookmarks', 'promptSnippets', 'pomodoro', 'pomodoroLog', 'dbaiProviders', 'sessionSnaps'];
 // Папка-«стор» для шаринга с пультом (агент кладёт сюда файлы; в PTY доступна как $LITE_STORE).
 const pultStoreDir = path.join(storeDir, 'store');
 try { fs.mkdirSync(pultStoreDir, { recursive: true }); } catch (_) {}
@@ -393,6 +393,9 @@ ipcMain.on('store:loadAll', (e) => {
   e.returnValue = o; // synchronous: renderer loads the snapshot once at startup
 });
 ipcMain.on('store:set', (_e, { key, value }) => { if (STORE_KEYS.includes(key)) writeStoreKey(key, value); });
+// Синхронный вариант — для записи на beforeunload (снимки сессий, идея 7): обычный send может
+// не успеть флашнуться до сноса рендерера, sendSync гарантирует запись до выхода.
+ipcMain.on('store:setSync', (e, { key, value } = {}) => { if (STORE_KEYS.includes(key)) writeStoreKey(key, value); e.returnValue = true; });
 ipcMain.handle('store:notesGet', (_e, id) => {
   try { return JSON.parse(fs.readFileSync(path.join(storeDir, 'notes', String(id).replace(/[^\w.-]/g, '_') + '.json'), 'utf8')); }
   catch { return []; }
@@ -625,6 +628,11 @@ const DBAI_AGENTS = {
   codex: { cmd: 'codex', args: ['exec'], via: 'arg', stream: 'text' },
 };
 const dbaiReqs = new Map();
+// Глушит карту in-flight задач разом: значение — ChildProcess (.kill) или ClientRequest/сокет (.destroy).
+function killReqMap(m) {
+  for (const v of m.values()) { try { if (v && typeof v.kill === 'function') v.kill(); else if (v && typeof v.destroy === 'function') v.destroy(); } catch (_) {} }
+  m.clear();
+}
 ipcMain.on('dbai:run', (e, { reqId, agent, prompt } = {}) => {
   const sender = e.sender;
   const conf = DBAI_AGENTS[agent] || DBAI_AGENTS.claude;
@@ -1639,10 +1647,17 @@ function openModuleWindow(modId) {
   win.on('closed', () => {
     moduleWindows.delete(modId);
     if (modId === 'files') filesViewerReady = false; // окно вивера закрыто → следующее openInViewer переоткроет и переждёт готовность
+    if (modId === 'ctx') { for (const w of ctxOutWatchers.values()) { try { w.close(); } catch (_) {} } ctxOutWatchers.clear(); } // окно «Контекст» закрылось без unwatch → не течём fs.watch (B2)
     for (const [sid, wc] of ownerBySession) { try { if (wc.isDestroyed()) ownerBySession.delete(sid); } catch (_) { ownerBySession.delete(sid); } }
     broadcastModuleOpenSet();
   });
-  win.webContents.on('render-process-gone', (_e, d) => logger.log('error', 'module-window', `${modId} ${JSON.stringify(d)}`));
+  // Рендерер окна модуля умер → окно неюзабельно, dirty-guard (win:closeRequest) ждать некому.
+  // Снимаем гард и закрываем принудительно, иначе ✕ не сработает (B4). destroy() → сработает 'closed'.
+  win.webContents.on('render-process-gone', (_e, d) => {
+    logger.log('error', 'module-window', `${modId} ${JSON.stringify(d)}`);
+    win.__forceClose = true;
+    try { if (!win.isDestroyed()) win.destroy(); } catch (_) {}
+  });
   win.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
     if (input.key === 'F12') win.webContents.toggleDevTools();
@@ -1764,7 +1779,7 @@ function pomoTick() {
   pomoEmit();
 }
 function pomoEnsureTimer() {
-  if (!pomoTimer) pomoTimer = setInterval(pomoTick, 1000);
+  if (!pomoTimer) { pomoTimer = setInterval(pomoTick, 1000); if (pomoTimer.unref) pomoTimer.unref(); }
 }
 function pomoStart(tech) {
   if (!tech) return { ok: false, error: 'Не задана техника' };
@@ -1783,6 +1798,7 @@ function pomoStart(tech) {
 }
 function pomoStop() {
   POMO.running = false; POMO.paused = false; POMO.phase = 'idle'; POMO.remaining = 0; POMO.cycle = 0;
+  if (pomoTimer) { clearInterval(pomoTimer); pomoTimer = null; } // не крутим 1с-тик впустую после «Стоп»
   pomoSyncOverlay();   // спрячет оверлей
   pomoEmit();
   return { ok: true };
@@ -1876,12 +1892,10 @@ function signalHeirReady() {
     } catch (_) {}
   };
   // did-finish-load = рендерер загрузился (редактор реально живой) → рапортуем.
-  if (mainWindow.webContents.isLoadingMainFrame && mainWindow.webContents.isLoadingMainFrame()) {
-    mainWindow.webContents.once('did-finish-load', () => setTimeout(ping, 400));
-  } else {
-    mainWindow.webContents.once('did-finish-load', () => setTimeout(ping, 400));
-    setTimeout(ping, 1500); // подстраховка, если did-finish-load уже прошёл
-  }
+  // ping идемпотентен, поэтому держим оба триггера: событие (если ещё грузится) +
+  // таймер-подстраховку (если did-finish-load уже прошёл и once больше не сработает).
+  mainWindow.webContents.once('did-finish-load', () => setTimeout(ping, 400));
+  setTimeout(ping, 1500);
 }
 
 // ----------------------------------------------------------- стор (файлы для пульта)
@@ -1946,16 +1960,12 @@ function pultStoreList(reqId, p) {
   entries.sort((a, b) => (b.isDir - a.isDir) || a.name.localeCompare(b.name));
   remote.send({ t: 'store:tree', reqId, path: abs, entries });
 }
+// Скачивание из стора: файл → стрим как есть, папка → zip. Один путь для onStoreGet и
+// onStoreGetZip (раньше был дубль pultStoreGetZip, отличавшийся лишь текстом ошибки).
 function pultStoreGet(reqId, p) {
   const abs = resolveInShares(p);
   if (!abs) { remote.send({ t: 'store:err', reqId, error: 'доступ запрещён' }); return; }
-  let st; try { st = fs.statSync(abs); } catch (_) { remote.send({ t: 'store:err', reqId, error: 'нет файла' }); return; }
-  if (st.isDirectory()) zipDirToPult(reqId, abs); else streamFileToPult(reqId, abs, path.basename(abs));
-}
-function pultStoreGetZip(reqId, p) {
-  const abs = resolveInShares(p);
-  if (!abs) { remote.send({ t: 'store:err', reqId, error: 'доступ запрещён' }); return; }
-  let st; try { st = fs.statSync(abs); } catch (_) { remote.send({ t: 'store:err', reqId, error: 'нет папки' }); return; }
+  let st; try { st = fs.statSync(abs); } catch (_) { remote.send({ t: 'store:err', reqId, error: 'нет файла или папки' }); return; }
   if (st.isDirectory()) zipDirToPult(reqId, abs); else streamFileToPult(reqId, abs, path.basename(abs));
 }
 
@@ -2013,7 +2023,6 @@ function remoteHistoryGet(reqId, sid, before, size) {
 }
 // Хост релея больше НЕ зашит — пользователь указывает свой (self-hosting). Пусто = пульт
 // не поднимается, пока не выполнен вход с хостом в модалке «Пульт».
-const REMOTE_DEFAULT_HOST = '';
 // Нормализуем введённый хост: срезаем схему (wss?://), путь и пробелы — остаётся голый host[:port].
 function normalizeRelayHost(s) {
   return String(s || '').trim().replace(/^wss?:\/\//i, '').replace(/^https?:\/\//i, '').replace(/\/.*$/, '').trim();
@@ -2054,7 +2063,7 @@ function startRemotePult() {
       onHistoryGet: (reqId, sid, before, size) => remoteHistoryGet(reqId, sid, before, size),
       onStoreList: (reqId, p) => pultStoreList(reqId, p),
       onStoreGet: (reqId, p) => pultStoreGet(reqId, p),
-      onStoreGetZip: (reqId, p) => pultStoreGetZip(reqId, p),
+      onStoreGetZip: (reqId, p) => pultStoreGet(reqId, p),
       onStoreCancel: (reqId) => { storeCancelled.add(reqId); },
       // Задачи на пульте: тот же notes/<id>.json, что и панель «Задачи» в редакторе.
       onTasksGet: (reqId, id) => pultTasksGet(reqId, id),
@@ -2100,7 +2109,7 @@ function relayPost(host, pathname, body, extraHeaders) {
 function remoteStoreState() {
   const r = readStoreKey('remote') || {};
   const st = remote.status();
-  return { loggedIn: !!r.token, login: r.login || '', enabled: r.enabled !== false, connected: st.connected, host: r.host || REMOTE_DEFAULT_HOST };
+  return { loggedIn: !!r.token, login: r.login || '', enabled: r.enabled !== false, connected: st.connected, host: r.host || '' };
 }
 
 // Регистрация/вход: дергаем указанный пользователем релей, сохраняем {login, token, host, enabled}, поднимаем соединение.
@@ -2125,7 +2134,7 @@ ipcMain.handle('remote:status', () => remoteStoreState());
 ipcMain.handle('remote:revokeAllDevices', async () => {
   const r = readStoreKey('remote') || {};
   if (!r.token) return { ok: false, error: 'не выполнен вход' };
-  const host = r.host || REMOTE_DEFAULT_HOST;
+  const host = r.host || '';
   const res = await relayPost(host, '/devices/revoke-all', {}, { Authorization: 'Bearer ' + r.token });
   if (res.status === 200) return { ok: true };
   return { ok: false, error: (res.body && (res.body.detail || res.body.error)) || res.error || `Ошибка (${res.status || 'нет связи'})` };
@@ -2196,10 +2205,16 @@ app.on('window-all-closed', () => {
   cLogProcs.clear();
   for (const c of companyReqs.values()) { try { companyKill(c); } catch (_) {} } // detached-директора не должны пережить редактор
   companyReqs.clear();
+  // In-flight агент-процессы/HTTP окон модулей (textproc/чат/AI-DB): окно могло крашнуться,
+  // не успев послать *:abort → не оставляем claude/codex/запрос сиротами после выхода (B3).
+  killReqMap(tpReqs); killReqMap(dbaiReqs); killReqMap(orReqs);
   try { dbApi.closeAll(); } catch (_) {}
   try { rhApi.closeAll(); } catch (_) {}
   for (const w of watchers.values()) { try { w.watcher.close(); } catch (_) {} }
   watchers.clear();
+  for (const w of ctxOutWatchers.values()) { try { w.close(); } catch (_) {} } // fs.watch выходных файлов «Контекста» (B2)
+  ctxOutWatchers.clear();
+  if (pomoTimer) { clearInterval(pomoTimer); pomoTimer = null; }
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -2389,6 +2404,16 @@ ipcMain.handle('dialog:pickDir', async () => {
 });
 
 // ---------------------------------------------------------------- PTY
+// Окружение для пользовательских шеллов/exec: НЕ протаскиваем внутренние переменные редактора
+// (порт «наследника» при рестарте, секреты релея) в каждый терминал и контейнер (B9) — там им
+// не место и они утекали бы в `env` любого процесса агента.
+const PTY_ENV_DENY = new Set(['LITE_HEIR_PORT', 'LITE_RELAY_TOKEN', 'LITE_RELAY_URL', 'RELAY_SECRET']);
+function userShellEnv(extra) {
+  const env = {};
+  for (const k of Object.keys(process.env)) if (!PTY_ENV_DENY.has(k)) env[k] = process.env[k];
+  return Object.assign(env, extra || {});
+}
+
 // owner = webContents окна, создавшего сессию (редактор для терминалов проектов, окно «Система · ~»
 // для scratch). Данные/выход маршрутизируем владельцу (sendToOwner; фолбэк — окно редактора).
 function spawnPtyFor(id, cwd, cols, rows, owner) {
@@ -2407,7 +2432,7 @@ function spawnPtyFor(id, cwd, cols, rows, owner) {
       rows: rows || 24,
       cwd: startCwd,
       // SHELL → реальный шелл; LITE_STORE → папка-стор (агент кладёт туда файлы для пульта).
-      env: { ...process.env, SHELL: shell, LITE_STORE: pultStoreDir },
+      env: userShellEnv({ SHELL: shell, LITE_STORE: pultStoreDir }),
     });
   } catch (err) {
     logger.log('error', 'pty', 'spawn failed', err);
@@ -2428,6 +2453,7 @@ function spawnPtyFor(id, cwd, cols, rows, owner) {
     ptySize.delete(id);
     mirrorDispose(id);
     sendToOwner(id, 'pty:exit', { id });
+    ownerBySession.delete(id); // сессия закрылась — не копим мёртвые id в карте маршрутизации (B4-LOW)
     try { remote.exit(id); remote.notifyState(); } catch (_) {}
   });
   ptys.set(id, proc);
@@ -2660,14 +2686,19 @@ ipcMain.handle('files:diffPair', async (_e, { a, b } = {}) => {
 // Watch a project root and tell the renderer when files change on disk — so the
 // tree and the open file refresh live while an agent edits things in the terminal.
 const isIgnoredPath = (rel) => rel.split(/[\\/]/).some((seg) => IGNORE_DIRS.has(seg));
+// Сообщить окнам (редактор + вивер), что слежение за деревом отвалилось → ручной ⟳ (идея 11).
+function notifyWatchEnded(root) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fs:watchEnded', { root });
+  const fw = filesWindow(); if (fw) fw.webContents.send('fs:watchEnded', { root });
+}
 ipcMain.on('fs:watch', (_e, root) => {
   if (!root || watchers.has(root) || !fs.existsSync(root)) return;
   let watcher;
   try {
     watcher = fs.watch(root, { recursive: true });
-  } catch (_) { return; } // inotify limits / unsupported — degrade to manual refresh
+  } catch (_) { notifyWatchEnded(root); return; } // inotify limits / unsupported — degrade to manual refresh
   const rec = { watcher, timer: null, pending: new Set() };
-  watcher.on('error', () => { try { watcher.close(); } catch (_) {} watchers.delete(root); });
+  watcher.on('error', () => { try { watcher.close(); } catch (_) {} watchers.delete(root); notifyWatchEnded(root); }); // рантайм-ошибка (B7/идея 11)
   watcher.on('change', (_type, filename) => {
     const rel = filename == null ? '' : String(filename);
     if (rel && isIgnoredPath(rel)) return;
@@ -3548,7 +3579,10 @@ ipcMain.handle('git:status', async (_e, root) => {
   const base = top.trim();
   // --untracked-files=all: перечислять КАЖДЫЙ новый файл по отдельности, а не схлопывать
   // содержимое неотслеживаемой папки в один элемент-каталог (во вкладке «Изменения» нужны файлы).
-  const out = await git(root, ['status', '--porcelain', '--untracked-files=all']);
+  // core.quotePath=false: иначе git октально экранирует не-ASCII имена и оборачивает в кавычки —
+  // снять кавычки мало, путь останется искажённым и не совпадёт с файлом на диске (декорации/диффы
+  // молча промахивались мимо русских/юникод-имён, B5).
+  const out = await git(root, ['-c', 'core.quotePath=false', 'status', '--porcelain', '--untracked-files=all']);
   const files = {};
   if (out) {
     for (const line of out.split('\n')) {
@@ -3715,7 +3749,7 @@ ipcMain.handle('git:conflicts', async (_e, root) => {
   const top = await git(root, ['rev-parse', '--show-toplevel']);
   if (top == null) return { repo: false, files: [] };
   const base = top.trim();
-  const out = await git(root, ['status', '--porcelain', '--untracked-files=no']);
+  const out = await git(root, ['-c', 'core.quotePath=false', 'status', '--porcelain', '--untracked-files=no']); // не-ASCII имена без октального экранирования (B5)
   const files = [];
   if (out) for (const line of out.split('\n')) {
     if (!line) continue;
@@ -4070,7 +4104,7 @@ ipcMain.handle('containers:execStart', (e, { engine, id, execId, cols, rows } = 
   let proc;
   try {
     proc = pty.spawn(engine, ['exec', '-it', id, 'sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash || exec sh'],
-      { name: 'xterm-color', cols: cols || 80, rows: rows || 24, env: process.env });
+      { name: 'xterm-color', cols: cols || 80, rows: rows || 24, env: userShellEnv() });
   } catch (e2) { return { error: String(e2.message || e2) }; }
   const sender = e.sender; // окно-владелец exec-терминала
   proc.onData((d) => safeSend(sender, 'containers:execData', { execId, data: d }));

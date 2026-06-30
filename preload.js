@@ -102,6 +102,7 @@ contextBridge.exposeInMainWorld('lite', {
   store: {
     loadAll: () => ipcRenderer.sendSync('store:loadAll'),       // sync snapshot at startup
     set: (key, value) => ipcRenderer.send('store:set', { key, value }),
+    setSync: (key, value) => ipcRenderer.sendSync('store:setSync', { key, value }), // гарантированная запись (beforeunload)
     notesGet: (id) => ipcRenderer.invoke('store:notesGet', id),
     notesSet: (id, notes) => ipcRenderer.invoke('store:notesSet', { id, notes }),
     notesExport: (json, name) => ipcRenderer.invoke('notes:exportFile', { json, name }), // → {ok,file}|{canceled}|{error}
@@ -424,6 +425,12 @@ contextBridge.exposeInMainWorld('lite', {
       const h = (_e, payload) => cb(payload);
       ipcRenderer.on('fs:changed', h);
       return () => ipcRenderer.removeListener('fs:changed', h);
+    },
+    // Слежение за деревом отвалилось (лимит inotify / ошибка вотчера) → UI подскажет про ручной ⟳.
+    onWatchEnded: (cb) => {
+      const h = (_e, payload) => cb(payload);
+      ipcRenderer.on('fs:watchEnded', h);
+      return () => ipcRenderer.removeListener('fs:watchEnded', h);
     },
     // Вивер: рекурсивный листинг (Ctrl+P), поиск по проекту (grep), сравнение двух файлов.
     listAll: (root) => ipcRenderer.invoke('files:listAll', root),

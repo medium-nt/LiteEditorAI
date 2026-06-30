@@ -8,6 +8,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { CanvasAddon } from '@xterm/addon-canvas';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { SerializeAddon } from '@xterm/addon-serialize';
 import '@xterm/xterm/css/xterm.css';
 
 // CodeMirror/marked/showMinimap/codeedit — переехали в окно вивера (renderer/modules/files.js).
@@ -15,7 +16,7 @@ import '@xterm/xterm/css/xterm.css';
 import { THEMES, TERM_THEME, DEFAULT_THEME } from './themes.js';
 import { loadFastRenderer, applyUnicode11, copySelection } from './termutil.js';
 // initTextProc — «Обработка текста» мигрирована в отдельное окно (renderer/module-entry.js).
-import { el, svgEl, icon, iconBtn, hydrateIcons, toast, makeModal, showConfirm, showPrompt, baseName, ICONS, setErrorSink, applyLayoutSwap } from './ui.js';
+import { el, icon, iconBtn, hydrateIcons, toast, makeModal, showConfirm, showPrompt, baseName, ICONS, setErrorSink } from './ui.js';
 // initGit — модуль «Git» мигрирован в отдельное окно (renderer/module-entry.js).
 // initCtx — модуль «Контекст» мигрирован в отдельное окно (renderer/module-entry.js).
 // initContainers — модуль «Контейнеры» мигрирован в отдельное окно (renderer/module-entry.js).
@@ -26,7 +27,7 @@ import { el, svgEl, icon, iconBtn, hydrateIcons, toast, makeModal, showConfirm, 
 import { initExtensions } from './modules/extensions.js';
 // initFiles — вивер+дерево мигрированы в отдельное окно (renderer/module-entry.js).
 
-const APP_VERSION = 'alpha v1.1.42';
+const APP_VERSION = 'alpha v1.1.50';
 const GUTTER = 5;
 // Системный терминал («Система · ~») мигрирован в отдельное окно (renderer/modules/scratch.js):
 // его id `__scratch__::tN` маршрутизируются main'ом в окно-владельца, в ядре их больше не обрабатываем.
@@ -105,9 +106,6 @@ function saveProjects() { persist('projects', projects); }
 function loadProjectsFromDisk() { return Array.isArray(STORE.projects) ? STORE.projects : []; }
 function loadLayout() { return { ...DEFAULT_LAYOUT, ...(STORE.layout || {}) }; }
 function saveLayout() { persist('layout', layout); }
-// Whether the viewer / system terminal panes are open — part of the backed-up state,
-// restored on startup (and on import) so the window reopens the way it was left.
-function saveUiState() { persist('uiState', {}); } // вивер теперь окно; набор открытых окон помнит main (moduleWins.__open)
 function applyLayout() {
   $('#sidebar').style.flexBasis = layout.sidebar + 'px';
   // вивер/дерево живут в своём окне — в редакторе этих панелей больше нет.
@@ -903,47 +901,134 @@ function saveProjTabs() {
   }
   persist('projTabs', out);
 }
-function createSession(proj, name) {
-  const id = proj.id + '::t' + (++sessionSeq);
-  const container = el('div', 'term-instance');
-  $('#terminals').appendChild(container);
+
+// ── Снимки сессий между перезапусками (идея 7) ────────────────────────────────
+// Живой PTY перезапуск приложения не переживает (дочерний процесс умирает с родителем), но
+// ВЫВОД пережить может: сериализуем scrollback каждой сессии (capped) и при следующем старте
+// показываем его как «историю до перезапуска» НАД свежим терминалом — агент/пользователь видит,
+// на чём остановились. Это снимок-история, не живой процесс.
+const SNAP_TTL_MS = 24 * 60 * 60 * 1000;  // снимки старше суток игнорируем
+const SNAP_SCROLLBACK = 800;              // сколько строк хвоста сериализовать
+const SNAP_PER_CAP = 80 * 1024;           // потолок на сессию, символов
+const SNAP_TOTAL_CAP = 1536 * 1024;       // общий потолок (бережём стор)
+// Снимки прошлого запуска, загруженные один раз; восстанавливаются по мере открытия проектов.
+const restoreSnaps = (() => {
+  const s = STORE.sessionSnaps;
+  if (s && s.ts && (Date.now() - s.ts) < SNAP_TTL_MS && s.data) return { ...s.data };
+  return {};
+})();
+function snapshotSessions() {
+  try {
+    const data = {};
+    let total = 0;
+    for (const [pid, t] of tabsByProj) {
+      t.sessions.forEach((sid, i) => {
+        if (total >= SNAP_TOTAL_CAP) return;
+        const rec = terms.get(sid);
+        if (!rec || !rec.serialize) return;
+        let str = '';
+        try { str = rec.serialize.serialize({ scrollback: SNAP_SCROLLBACK, excludeAltBuffer: true, excludeModes: true }); } catch (_) { return; }
+        if (!str) return;
+        if (str.length > SNAP_PER_CAP) str = str.slice(str.length - SNAP_PER_CAP); // храним хвост
+        (data[pid] = data[pid] || [])[i] = str;
+        total += str.length;
+      });
+    }
+    const payload = { ts: Date.now(), data };
+    STORE.sessionSnaps = payload;
+    // setSync — чтобы запись прошла даже на beforeunload (async send мог бы не успеть).
+    try { lite.store.setSync('sessionSnaps', payload); } catch (_) { try { lite.store.set('sessionSnaps', payload); } catch (_) {} }
+  } catch (_) {}
+}
+// Восстановить историю в только что созданную сессию (индекс i вкладки проекта).
+function restoreSessionSnapshot(projId, idx, sid) {
+  const arr = restoreSnaps[projId];
+  const snap = arr && arr[idx];
+  if (!snap) return;
+  const rec = terms.get(sid);
+  if (!rec) return;
+  try {
+    rec.term.write(snap);
+    rec.term.write('\r\n\x1b[2m' + '─'.repeat(16) + ' снимок до перезапуска редактора ' + '─'.repeat(16) + '\x1b[0m\r\n');
+  } catch (_) {}
+}
+// ── Реестр глобальных горячих клавиш ядра (идея 5) ────────────────────────────
+// Единый источник правды. Матч по физическим клавишам (e.code) → работает в любой
+// раскладке. Эти комбо перехватываются И на уровне document, И внутри терминала: фабрика
+// xterm зовёт runGlobalHotkey и, если перехвачено, глушит байт + stopPropagation (иначе
+// document-хендлер сработал бы вторично, а xterm отправил бы код в PTY — баг B1, из-за
+// которого Ctrl+\ слал SIGQUIT активному агенту, Ctrl+K — kill-line readline и т.п.).
+const HOTKEYS = [
+  { test: (e) => e.code === 'Backslash',                            run: () => toggleSingle() },
+  { test: (e) => e.code === 'KeyK',                                 run: () => showPalette() },
+  { test: (e) => e.code === 'Equal' || e.code === 'NumpadAdd',      run: () => bumpFont(1) },
+  { test: (e) => e.code === 'Minus' || e.code === 'NumpadSubtract', run: () => bumpFont(-1) },
+  { test: (e) => e.code === 'Tab',                                  run: (e) => cycleProject(e.shiftKey ? -1 : 1) },
+  { test: (e) => e.code === 'KeyF' && e.shiftKey,                   run: () => showGlobalSearch() }, // Ctrl+Shift+F — поиск по всем сессиям (идея 9)
+  { test: (e) => /^Digit[1-9]$/.test(e.code) && !e.shiftKey,        run: (e) => { const p = projects[+e.code.slice(5) - 1]; if (p) setActive(p.id); } },
+];
+function runGlobalHotkey(e) {
+  if (!e.ctrlKey || e.metaKey) return false;
+  for (const h of HOTKEYS) { if (h.test(e)) { e.preventDefault(); h.run(e); return true; } }
+  return false;
+}
+
+// ── Единая фабрика терминалов (идея 4) ────────────────────────────────────────
+// Общая сборка xterm для сессий проектов и dev-терминалов модулей: Terminal + аддоны +
+// рендерер + PTY + базовый обработчик клавиш. Вызывающий передаёт id/cwd, хук ввода и
+// набор «своих» клавиш (onKey) поверх базовых. Это убрало ~90% дубля между
+// createSession и createExtTerminal, который раньше норовил разъехаться.
+function buildXterm(container, id, { cwd, onInput, onKey } = {}) {
   const term = new Terminal({
     fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace',
     fontSize: settings.fontSize, cursorBlink: true, allowProposedApi: true, theme: termTheme(), scrollback: 5000,
   });
   const fit = new FitAddon();
   const search = new SearchAddon();
+  const serialize = new SerializeAddon();
   term.loadAddon(fit);
   term.loadAddon(search);
+  term.loadAddon(serialize);
   term.loadAddon(new WebLinksAddon((_e, uri) => lite.openExternal(uri)));
   applyUnicode11(term);
   term.open(container);
   loadFastRenderer(term);
   fit.fit();
-  term.registerLinkProvider(fileLinkProvider(term, proj.path));
-  lite.pty.create({ id, cwd: proj.path, cols: term.cols, rows: term.rows });
-  term.onData((data) => {
-    const r = terms.get(id);
-    if (r) r.lastInputAt = Date.now();
-    lite.pty.write(id, data);
-  });
+  lite.pty.create({ id, cwd, cols: term.cols, rows: term.rows });
+  term.onData((data) => { if (onInput) onInput(data); lite.pty.write(id, data); });
   term.onResize(({ cols, rows }) => lite.pty.resize(id, cols, rows));
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true;
-    // Match by physical key (e.code), NOT e.key — so Ctrl+C/V/F etc. work in ANY keyboard
+    // Match by physical key (e.code), NOT e.key — so Ctrl+C/V etc. work in ANY keyboard
     // layout (in Russian layout Ctrl+V gives e.key='м', which the old e.key check missed).
-    if (e.ctrlKey && e.shiftKey && e.code === 'KeyT') { addTab(); return false; }
-    if (e.ctrlKey && e.shiftKey && e.code === 'KeyW') { const s = activeSessionId(); if (s) closeTab(s); return false; }
-    if (e.ctrlKey && (e.key === 'PageDown' || e.key === 'PageUp')) { cycleTab(e.key === 'PageDown' ? 1 : -1); return false; }
     if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyC') return !copySelection(term); // copied → swallow; else SIGINT
     if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyV') { e.preventDefault(); pasteInto(id); return false; } // preventDefault — иначе xterm вставит ещё раз нативно (дубль)
-    if (e.ctrlKey && !e.altKey && e.code === 'KeyF') { openTermSearch(); return false; }
     // Ctrl+Enter — перенос строки в вводе (продолжение команды), а не выполнение: \ + CR для bash/zsh, LF для ConPTY/PSReadLine (Win)
     if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'Enter') { lite.pty.write(id, lite.platform === 'win32' ? '\n' : '\\\r'); return false; }
+    if (onKey && onKey(e) === false) return false;            // клавиши вызывающего (вкладки/поиск проекта)
+    if (runGlobalHotkey(e)) { e.stopPropagation(); return false; } // глобальные хоткеи в фокусе терминала (B1)
     return true;
   });
   container.addEventListener('contextmenu', (e) => { e.preventDefault(); showTermMenu(e.clientX, e.clientY, term, id); });
-  const rec = { term, fit, search, container, projId: proj.id, name, idleTimer: null, sawBell: false, tail: '', busyStart: 0, lastInputAt: 0, activitySeq: 0 };
+  return { term, fit, search, serialize };
+}
+
+function createSession(proj, name) {
+  const id = proj.id + '::t' + (++sessionSeq);
+  const container = el('div', 'term-instance');
+  $('#terminals').appendChild(container);
+  const { term, fit, search, serialize } = buildXterm(container, id, {
+    cwd: proj.path,
+    onInput: () => { const r = terms.get(id); if (r) r.lastInputAt = Date.now(); },
+    onKey: (e) => {
+      if (e.ctrlKey && e.shiftKey && e.code === 'KeyT') { addTab(); return false; }
+      if (e.ctrlKey && e.shiftKey && e.code === 'KeyW') { const s = activeSessionId(); if (s) closeTab(s); return false; }
+      if (e.ctrlKey && (e.key === 'PageDown' || e.key === 'PageUp')) { cycleTab(e.key === 'PageDown' ? 1 : -1); return false; }
+      if (e.ctrlKey && !e.altKey && !e.shiftKey && e.code === 'KeyF') { openTermSearch(); return false; } // Ctrl+F (без Shift) — поиск в этом терминале; Ctrl+Shift+F уходит в глобальный (реестр)
+    },
+  });
+  term.registerLinkProvider(fileLinkProvider(term, proj.path));
+  const rec = { term, fit, search, serialize, container, projId: proj.id, name, idleTimer: null, sawBell: false, tail: '', busyStart: 0, lastInputAt: 0, activitySeq: 0 };
   terms.set(id, rec);
   tabsByProj.get(proj.id).sessions.push(id);
   // «Контекст»: тихая автосборка — новая сессия агента должна найти готовый CLAUDE.md/AGENTS.md,
@@ -977,7 +1062,8 @@ function ensureProjectTabs(proj) {
   tabsByProj.set(proj.id, { sessions: [], active: null });
   const saved = (STORE.projTabs || {})[proj.id];
   const names = saved && Array.isArray(saved.names) && saved.names.length ? saved.names : ['Терминал 1'];
-  names.forEach((n) => createSession(proj, n));
+  names.forEach((n, i) => { const sid = createSession(proj, n); restoreSessionSnapshot(proj.id, i, sid); }); // история до перезапуска (идея 7)
+  delete restoreSnaps[proj.id]; // снимок потреблён — не восстанавливать повторно при переоткрытии проекта
   const t = tabsByProj.get(proj.id);
   const ai = saved && Number.isInteger(saved.active) ? saved.active : 0;
   t.active = t.sessions[Math.max(0, Math.min(ai, t.sessions.length - 1))] || t.sessions[0];
@@ -1166,30 +1252,9 @@ function restartTerminal(id) {
 // Возвращает handle для extensions.js; xterm в код модуля не утекает (правило изоляции).
 function createExtTerminal(container, cwd) {
   const id = EXT_TERM_ID + '::t' + (++extTermSeq);
-  const term = new Terminal({
-    fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace',
-    fontSize: settings.fontSize, cursorBlink: true, allowProposedApi: true, theme: termTheme(), scrollback: 5000,
-  });
-  const fit = new FitAddon();
-  const search = new SearchAddon();
-  term.loadAddon(fit);
-  term.loadAddon(search);
-  term.loadAddon(new WebLinksAddon((_e, uri) => lite.openExternal(uri)));
-  applyUnicode11(term);
-  term.open(container);
-  loadFastRenderer(term);
-  fit.fit();
-  lite.pty.create({ id, cwd, cols: term.cols, rows: term.rows });
-  term.onData((data) => lite.pty.write(id, data));
-  term.onResize(({ cols, rows }) => lite.pty.resize(id, cols, rows));
-  term.attachCustomKeyEventHandler((e) => {
-    if (e.type !== 'keydown') return true;
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyC') return !copySelection(term);
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyV') { e.preventDefault(); pasteInto(id); return false; }
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'Enter') { lite.pty.write(id, lite.platform === 'win32' ? '\n' : '\\\r'); return false; }
-    return true;
-  });
-  container.addEventListener('contextmenu', (e) => { e.preventDefault(); showTermMenu(e.clientX, e.clientY, term, id); });
+  // Без onKey: у dev-терминала модуля нет вкладок, а Ctrl+F открыл бы поиск ЧУЖОГО
+  // (активного проектного) терминала — поэтому поиск здесь не перехватываем (как было).
+  const { term, fit, search } = buildXterm(container, id, { cwd });
   extTerms.set(id, { term, fit, search, container });
   return {
     id,
@@ -1235,8 +1300,79 @@ function runTermSearch(dir) {
   const rec = terms.get(activeSessionId());
   const q = $('#term-search-input').value;
   if (!rec || !q) return;
-  const opts = { decorations: { matchOverviewRuler: '#e0af68', activeMatchColorOverviewRuler: '#3ddc84' } };
+  // Метки overview-ruler берём из токенов активной темы, а не хардкодим (контракт тем):
+  // --warn для совпадений, --add для активного — так они согласованы с любой темой.
+  const css = getComputedStyle(document.documentElement);
+  const opts = { decorations: {
+    matchOverviewRuler: (css.getPropertyValue('--warn') || '#e0af68').trim() || '#e0af68',
+    activeMatchColorOverviewRuler: (css.getPropertyValue('--add') || '#3ddc84').trim() || '#3ddc84',
+  } };
   if (dir < 0) rec.search.findPrevious(q, opts); else rec.search.findNext(q, opts);
+}
+
+// ── Глобальный поиск по выводу ВСЕХ открытых сессий (идея 9) ───────────────────
+// Когда параллельно работают несколько агентов, важно быстро найти «где это проскочило».
+// Сканируем scrollback каждого терминала (read-only, PTY не трогаем), показываем совпадения
+// сгруппированно по сессии; клик переключает на сессию и подсвечивает строку.
+const GS_PER_SESSION = 60;   // потолок совпадений на одну сессию
+const GS_TOTAL = 400;        // общий потолок строк в выдаче
+function scanTermBuffer(term, q) {
+  const out = [];
+  try {
+    const buf = term.buffer.active;
+    const ql = q.toLowerCase();
+    for (let y = 0; y < buf.length && out.length < GS_PER_SESSION; y++) {
+      const line = buf.getLine(y);
+      if (!line) continue;
+      const text = line.translateToString(true);
+      if (text.toLowerCase().includes(ql)) out.push({ y, text: text.trim().slice(0, 200) });
+    }
+  } catch (_) {}
+  return out;
+}
+function jumpToSession(projId, sid) {
+  setActive(projId);
+  const t = tabsByProj.get(projId);
+  if (t && t.sessions.includes(sid)) { t.active = sid; saveProjTabs(); }
+  showActiveTerminal();
+}
+function showGlobalSearch() {
+  const { m, close } = makeModal(`
+    <h2>🔎 Поиск по всем терминалам</h2>
+    <input type="text" id="gs-q" placeholder="искать в выводе всех открытых сессий…" spellcheck="false" autocomplete="off">
+    <div id="gs-results" class="gs-results"></div>`);
+  const input = m.querySelector('#gs-q');
+  const box = m.querySelector('#gs-results');
+  let timer = null;
+  const run = () => {
+    const q = input.value.trim();
+    box.innerHTML = '';
+    if (q.length < 2) { box.appendChild(el('div', 'gs-empty', 'Введите минимум 2 символа')); return; }
+    let total = 0;
+    for (const [sid, rec] of terms) {
+      if (total >= GS_TOTAL) break;
+      const hits = scanTermBuffer(rec.term, q);
+      if (!hits.length) continue;
+      const proj = projects.find((p) => p.id === rec.projId);
+      box.appendChild(el('div', 'gs-group', `${proj ? proj.name : '—'} · ${rec.name} — совпадений: ${hits.length}`));
+      for (const h of hits) {
+        if (total >= GS_TOTAL) break;
+        const row = el('div', 'gs-hit');
+        row.appendChild(el('span', 'gs-ln', String(h.y)));
+        row.appendChild(el('span', 'gs-text', h.text));
+        row.onclick = () => {
+          jumpToSession(rec.projId, sid);
+          requestAnimationFrame(() => { try { rec.term.scrollToLine(Math.max(0, h.y - 2)); rec.search.findNext(q); } catch (_) {} });
+          close();
+        };
+        box.appendChild(row); total++;
+      }
+    }
+    if (!total) box.appendChild(el('div', 'gs-empty', 'Ничего не найдено в открытых сессиях'));
+  };
+  input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 160); });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(timer); run(); } });
+  setTimeout(() => input.focus(), 30);
 }
 
 // guardDirty (защита несохранённых правок вивера при переключении) переехал в files.js → Files.guardDirty.
@@ -1252,8 +1388,13 @@ function doSetActive(id) {
   if (!proj) return;
   activeId = id;
   try { lite.errors.setContext(proj.path); } catch (_) {} // тег проекта для новых ошибок в реестре
-  if (watchedRoot && watchedRoot !== proj.path) lite.fs.unwatch(watchedRoot);
-  lite.fs.watch(proj.path); watchedRoot = proj.path;
+  // Перевешиваем вотчер ТОЛЬКО при смене корня — иначе повторная активация уже активного
+  // проекта (например, тап «+» с пульта зовёт doSetActive безусловно) плодила бы дубль fs.watch
+  // и дублирующиеся fs:changed (B6).
+  if (watchedRoot !== proj.path) {
+    if (watchedRoot) lite.fs.unwatch(watchedRoot);
+    lite.fs.watch(proj.path); watchedRoot = proj.path;
+  }
   ensureProjectTabs(proj);
   renderProjects();
   showActiveTerminal();
@@ -1390,6 +1531,16 @@ function renderQuickbar() {
   if (wasHidden !== !shown) setTimeout(refitActiveTerminal, 60); // высота терминала изменилась
   updateNotesBadge();
   updatePomoUI(pomoLast); // перерисовали квикбар — восстановить бейдж остатка помодоро
+  markOpenModules();      // восстановить подсветку открытых окон-модулей (идея 3)
+}
+// Подсветка кнопок квикбара тех модулей, чьи окна сейчас открыты (main шлёт module:openSet).
+// Раньше событие рассылалось, но его никто не слушал (мёртвый мост onOpenSet) — теперь видно,
+// что открыто, не переключаясь по окнам.
+let openModuleIds = new Set();
+function markOpenModules() {
+  document.querySelectorAll('#quickbar .qb-btn').forEach((b) => {
+    b.classList.toggle('open', openModuleIds.has(b.dataset.mod));
+  });
 }
 // Бейдж активных (не выполненных) задач АКТИВНОГО проекта на кнопке «Задачи» квикбара. Источник —
 // STORE.noteCounts (стартовый снимок в main.js + живые апдейты через refreshNotesCount по app:notesChanged).
@@ -2305,7 +2456,8 @@ function paletteActions() {
   acts.push({ label: 'ИИ компания — команда агентов над проектом', run: () => openModule('company') });
   acts.push({ label: 'Помодоро — таймер работы/отдыха', run: () => openModule('pomodoro') });
   acts.push({ label: 'Режим «один терминал»', run: toggleSingle });
-  acts.push({ label: 'Поиск в терминале', run: openTermSearch });
+  acts.push({ label: 'Поиск в терминале', hint: 'Ctrl+F', run: openTermSearch });
+  acts.push({ label: 'Поиск по всем терминалам', hint: 'Ctrl+Shift+F', run: showGlobalSearch });
   acts.push({ label: 'Очистить терминал', run: () => clearTerminal() });
   acts.push({ label: 'Перезапустить терминал', run: () => restartTerminal() });
   acts.push({ label: 'Настройки…', run: showSettings });
@@ -2486,7 +2638,7 @@ function applyRestGuard(s) {
   const host = $('#term-body');
   if (!host) return;
   if (!s || !s.show) {
-    if (restGuardEl) { restGuardEl.remove(); restGuardEl = null; }
+    if (restGuardEl) { restGuardEl.remove(); restGuardEl = null; try { showActiveTerminal(); const r = terms.get(activeSessionId()); if (r) r.term.focus(); } catch (_) {} } // вернуть фокус терминалу после перерыва
     return;
   }
   const justAppeared = !restGuardEl;
@@ -2610,6 +2762,8 @@ function init() {
   lite.editorBus.onRestGuard((s) => { try { applyRestGuard(s); } catch (e) { console.error(e); } }); // Помодоро: оверлей отдыха над терминалами
   lite.pomodoro.onTick((s) => { try { updatePomoUI(s); } catch (_) {} });        // мини-таймер в титлбаре + бейдж квикбара
   lite.pomodoro.onChime(({ to }) => { try { pomoChime(to); } catch (_) {} });     // звон смены фазы
+  // Набор открытых окон-модулей → подсветка кнопок квикбара (идея 3).
+  try { if (lite.module && lite.module.onOpenSet) lite.module.onOpenSet((ids) => { openModuleIds = new Set(ids || []); markOpenModules(); }); } catch (_) {}
   { const mini = $('#pomo-mini'); if (mini) mini.onclick = () => openModule('pomodoro'); }
   lite.pomodoro.getState().then((s) => updatePomoUI(s)).catch(() => {});          // стартовый снимок (таймер мог идти до открытия редактора)
   $('#term-clear').addEventListener('click', () => clearTerminal());
@@ -2631,18 +2785,9 @@ function init() {
 
   // OpenRouter (чат) живёт в окне модуля — bindControls/bindStream вызывает module-entry.js.
 
-  document.addEventListener('keydown', (e) => {
-    // Esc-выход из полноэкранного превью и Ctrl+S сохранения файла живут в окне вивера (его keydown).
-    if (e.ctrlKey && e.key === '\\') { e.preventDefault(); toggleSingle(); }
-    if (e.ctrlKey && e.code === 'KeyK') { e.preventDefault(); showPalette(); }   // то же: Ctrl+K → e.key='л' в русской раскладке
-    if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); bumpFont(1); }
-    if (e.ctrlKey && e.key === '-') { e.preventDefault(); bumpFont(-1); }
-    if (e.ctrlKey && e.key === 'Tab') { e.preventDefault(); cycleProject(e.shiftKey ? -1 : 1); }
-    if (e.ctrlKey && /^[1-9]$/.test(e.key)) {
-      const p = projects[parseInt(e.key, 10) - 1];
-      if (p) { e.preventDefault(); setActive(p.id); }
-    }
-  });
+  // Esc-выход из полноэкранного превью и Ctrl+S сохранения файла живут в окне вивера (его keydown).
+  // Глобальные хоткеи — через единый реестр HOTKEYS (тот же, что перехватывает фабрика терминалов).
+  document.addEventListener('keydown', (e) => { runGlobalHotkey(e); });
 
   // drag a folder onto the window to open it as a project
   document.addEventListener('dragover', (e) => { e.preventDefault(); });
@@ -2657,6 +2802,11 @@ function init() {
   let rezTimer;
   new ResizeObserver(() => { clearTimeout(rezTimer); rezTimer = setTimeout(() => refitActiveTerminal(), 80); }).observe($('#terminal-pane'));
   // scratch/rh ресайз теперь в окнах модулей — обрабатывается module-entry.js.
+
+  // Снимок вывода сессий — на закрытие/перезагрузку и периодически (краш-страховка), чтобы при
+  // следующем старте показать историю до перезапуска над свежими терминалами (идея 7).
+  window.addEventListener('beforeunload', snapshotSessions);
+  setInterval(snapshotSessions, 30000);
 
   applyFontSize();
   projects = loadProjectsFromDisk();
