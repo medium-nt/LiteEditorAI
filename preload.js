@@ -329,7 +329,12 @@ contextBridge.exposeInMainWorld('lite', {
     log: (root, limit) => ipcRenderer.invoke('git:log', { root, limit }),
     init: (root) => ipcRenderer.invoke('git:init', root),
     clone: (root, url) => ipcRenderer.invoke('git:clone', { root, url }),
-    commit: (root, message, push, files) => ipcRenderer.invoke('git:commit', { root, message, push, files }),
+    commit: (root, message, push, files, amend) => ipcRenderer.invoke('git:commit', { root, message, push, files, amend }),
+    lastMessage: (root) => ipcRenderer.invoke('git:lastMessage', root),
+    fileLog: (root, file, limit) => ipcRenderer.invoke('git:fileLog', { root, file, limit }),
+    cherryPick: (root, hash) => ipcRenderer.invoke('git:cherryPick', { root, hash }),
+    revertCommit: (root, hash) => ipcRenderer.invoke('git:revertCommit', { root, hash }),
+    commitMsg: (root, hash) => ipcRenderer.invoke('git:commitMsg', { root, hash }),
     add: (root, files) => ipcRenderer.invoke('git:add', { root, files }),
     conflicts: (root) => ipcRenderer.invoke('git:conflicts', root),
     merge: (root, branch) => ipcRenderer.invoke('git:merge', { root, branch }),
@@ -343,7 +348,6 @@ contextBridge.exposeInMainWorld('lite', {
     discardFile: (root, file) => ipcRenderer.invoke('git:discardFile', { root, file }),
     discardAll: (root) => ipcRenderer.invoke('git:discardAll', root),
     stash: (root) => ipcRenderer.invoke('git:stash', root),
-    stashPop: (root) => ipcRenderer.invoke('git:stashPop', root),
     blame: (root, file) => ipcRenderer.invoke('git:blame', { root, file }), // A7: пер-строчный git blame
     revertHunk: (root, patch) => ipcRenderer.invoke('git:revertHunk', { root, patch }), // C18: откат ханка
     // stash-управление (PhpStorm-style: список + просмотр файлов + apply/pop/drop по индексу)
@@ -355,6 +359,9 @@ contextBridge.exposeInMainWorld('lite', {
     // лог: файлы коммита (дерево) + дифф файла в коммите
     commitFiles: (root, hash) => ipcRenderer.invoke('git:commitFiles', { root, hash }),
     commitFileDiff: (root, hash, file) => ipcRenderer.invoke('git:commitFileDiff', { root, hash, file }),
+    // пары «до/после» для side-by-side диффа
+    filePair: (root, file) => ipcRenderer.invoke('git:filePair', { root, file }),
+    commitFilePair: (root, hash, file) => ipcRenderer.invoke('git:commitFilePair', { root, hash, file }),
     // ветки (local+remote) + операции PhpStorm-style
     branches: (root) => ipcRenderer.invoke('git:branches', root),
     branchRename: (root, from, to) => ipcRenderer.invoke('git:branchRename', { root, from, to }),
@@ -473,6 +480,10 @@ contextBridge.exposeInMainWorld('lite', {
     // Вивер: рекурсивный листинг (Ctrl+P), поиск по проекту (grep), сравнение двух файлов.
     listAll: (root) => ipcRenderer.invoke('files:listAll', root),
     search: (root, query, opts) => ipcRenderer.invoke('files:search', { root, query, opts }),
+    replace: (root, query, opts, replacement, targets) => ipcRenderer.invoke('files:replace', { root, query, opts, replacement, targets }),
     diffPair: (a, b) => ipcRenderer.invoke('files:diffPair', { a, b }),
+    // Локальная история файла (снапшоты автосейва/внешних правок).
+    histList: (file) => ipcRenderer.invoke('hist:list', file),
+    histRead: (file, name) => ipcRenderer.invoke('hist:read', { file, name }),
   },
 });

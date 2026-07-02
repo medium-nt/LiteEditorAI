@@ -3010,13 +3010,18 @@ ipcMain.handle('fs:readDir', async (_e, dir) => {
 ipcMain.handle('fs:readFile', async (_e, file) => {
   try {
     const stat = await fs.promises.stat(file);
+    // Сокеты/FIFO/девайсы — не открываем: socket даёт ENXIO, а readFile FIFO повис бы навсегда.
+    if (!stat.isFile()) return { error: 'Это не обычный файл (сокет/FIFO/каталог)' };
     if (stat.size > MAX_VIEW_BYTES) return { error: `Файл слишком большой (${Math.round(stat.size / 1024)} КБ)` };
     return { content: await fs.promises.readFile(file, 'utf8') };
   } catch (err) { return { error: String(err.message || err) }; }
 });
 ipcMain.handle('fs:writeFile', async (_e, { file, content }) => {
-  try { await fs.promises.writeFile(file, content, 'utf8'); return { ok: true }; }
-  catch (err) { return { error: String(err.message || err) }; }
+  try {
+    await histSnapshotFromDisk(file, 'save');   // локальная история: состояние ДО записи (best-effort)
+    await fs.promises.writeFile(file, content, 'utf8');
+    return { ok: true };
+  } catch (err) { return { error: String(err.message || err) }; }
 });
 ipcMain.handle('fs:mkdir', async (_e, { parent, name }) => {
   const safe = safeChildName(name);                       // блокируем ../ и сепараторы (PC-3)
@@ -3175,6 +3180,48 @@ ipcMain.handle('files:search', async (_e, { root, query, opts } = {}) => {
   } catch (err) { return { error: String(err.message || err) }; }
   return { matches, capped };
 });
+// Замена по проекту: рендерер присылает итог files:search с галочками — список целей
+// { file(rel), lines[1-based] }. Заменяем ТОЛЬКО в этих строках (та же регэксп-логика, что у
+// поиска, + флаг g — несколько совпадений на строке заменяются разом). Перед записью каждого
+// файла — снапшот в локальную историю. Пути целей зажаты внутрь root (без ../-побегов).
+ipcMain.handle('files:replace', async (_e, { root, query, opts, replacement, targets } = {}) => {
+  if (!root || !query || !Array.isArray(targets) || !targets.length) return { error: 'нет целей замены' };
+  const o = opts || {};
+  let re;
+  try {
+    const src = o.regex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    re = new RegExp(src, o.caseSensitive ? 'g' : 'gi');
+  } catch { return { error: 'некорректное регулярное выражение' }; }
+  // не-regex режим: replacement литеральный — экранируем $, иначе "$&" в тексте замены сработал бы как группа
+  const repl = o.regex ? String(replacement ?? '') : String(replacement ?? '').replace(/\$/g, '$$$$');
+  const rootNorm = path.resolve(root);
+  let files = 0, lines = 0;
+  for (const t of targets) {
+    if (!t || !t.file || !Array.isArray(t.lines) || !t.lines.length) continue;
+    const full = path.resolve(rootNorm, t.file);
+    if (full !== rootNorm && !full.startsWith(rootNorm + path.sep)) continue;
+    let st; try { st = await fs.promises.stat(full); } catch { continue; }
+    if (!st.isFile() || st.size > FILES_SEARCH_FILE_MAX) continue;
+    let text; try { text = await fs.promises.readFile(full, 'utf8'); } catch { continue; }
+    if (text.includes('\0')) continue;
+    const rows = text.split('\n');
+    let touched = 0;
+    for (const ln of t.lines) {
+      const i = (ln | 0) - 1;
+      if (i < 0 || i >= rows.length) continue;
+      re.lastIndex = 0;
+      const next = rows[i].replace(re, repl);
+      if (next !== rows[i]) { rows[i] = next; touched++; }
+    }
+    if (!touched) continue;
+    try {
+      await histSnapshot(full, text, 'save');       // локальная история: состояние до замены
+      await fs.promises.writeFile(full, rows.join('\n'), 'utf8');
+      files++; lines += touched;
+    } catch (err) { return { error: String(err.message || err) + ' (' + t.file + ')', files, lines }; }
+  }
+  return { ok: true, files, lines };
+});
 ipcMain.handle('files:diffPair', async (_e, { a, b } = {}) => {
   if (!a || !b) return { error: 'нужны два файла' };
   // git diff --no-index сравнивает произвольные файлы вне репозитория; exit 1 = «есть отличия» (норма).
@@ -3184,6 +3231,65 @@ ipcMain.handle('files:diffPair', async (_e, { a, b } = {}) => {
       (_err, stdout) => resolve(stdout || ''));
   });
   return { diff: out };
+});
+
+// ---------------------------------------------------------------- локальная история файлов (PhpStorm Local History)
+// Снапшоты текстовых файлов в ~/.LiteEditorAI/history/<sha1(absPath)>/<ts>-<tag>.snap.
+// Точки съёма: fs:writeFile — состояние ДО записи (tag 'save', правка из вивера/замены по проекту);
+// вотчер проекта — состояние ПОСЛЕ внешнего изменения (tag 'ext' — агент/git/другой редактор).
+// Best-effort: любая ошибка истории молча глотается, работе редактора не мешает.
+const HIST_DIR = path.join(storeDir, 'history');
+const HIST_MAX_PER_FILE = 25;                   // ротация: столько версий держим на файл
+const HIST_MAX_BYTES = MAX_VIEW_BYTES;          // крупнее лимита вивера — не снапшотим
+const HIST_MIN_GAP_MS = { save: 45000, ext: 15000 }; // троттл на файл: серия автосейвов ≠ серия версий
+const HIST_BATCH_CAP = 20;                      // пачка вотчера крупнее — массовая операция (checkout/npm), шум
+const histKey = (absFile) => crypto.createHash('sha1').update(String(absFile)).digest('hex').slice(0, 20);
+const HIST_NAME_RE = /^(\d{10,16})-(save|ext)\.snap$/;
+async function histSnapshot(absFile, content, tag) {
+  try {
+    if (typeof content !== 'string' || Buffer.byteLength(content) > HIST_MAX_BYTES || content.includes('\0')) return;
+    const dir = path.join(HIST_DIR, histKey(absFile));
+    await fs.promises.mkdir(dir, { recursive: true });
+    const names = (await fs.promises.readdir(dir)).filter((n) => HIST_NAME_RE.test(n)).sort();
+    if (names.length) {
+      const last = names[names.length - 1];
+      const m = HIST_NAME_RE.exec(last);
+      // дедуп по содержимому + троттл по времени (свежий снапшот уже есть — серию не плодим)
+      if (Date.now() - Number(m[1]) < (HIST_MIN_GAP_MS[tag] || 15000)) return;
+      const prev = await fs.promises.readFile(path.join(dir, last), 'utf8');
+      if (prev === content) return;
+    }
+    await fs.promises.writeFile(path.join(dir, `${Date.now()}-${tag}.snap`), content, 'utf8');
+    fs.promises.writeFile(path.join(dir, 'meta.json'), JSON.stringify({ file: absFile }), 'utf8').catch(() => {});
+    const all = (await fs.promises.readdir(dir)).filter((n) => HIST_NAME_RE.test(n)).sort();
+    for (const n of all.slice(0, Math.max(0, all.length - HIST_MAX_PER_FILE)))
+      fs.promises.unlink(path.join(dir, n)).catch(() => {});
+  } catch (_) { /* история — best-effort */ }
+}
+// Снапшот текущего состояния файла на диске (для внешних изменений из вотчера).
+async function histSnapshotFromDisk(absFile, tag) {
+  try {
+    const st = await fs.promises.stat(absFile);
+    if (!st.isFile() || st.size > HIST_MAX_BYTES) return;
+    await histSnapshot(absFile, await fs.promises.readFile(absFile, 'utf8'), tag);
+  } catch (_) { /* удалён/не читается — пропускаем */ }
+}
+ipcMain.handle('hist:list', async (_e, file) => {
+  try {
+    const dir = path.join(HIST_DIR, histKey(file));
+    const names = (await fs.promises.readdir(dir)).filter((n) => HIST_NAME_RE.test(n)).sort().reverse();
+    const items = await Promise.all(names.map(async (n) => {
+      const m = HIST_NAME_RE.exec(n);
+      let size = 0; try { size = (await fs.promises.stat(path.join(dir, n))).size; } catch (_) {}
+      return { name: n, ts: Number(m[1]), tag: m[2], size };
+    }));
+    return { ok: true, items };
+  } catch (_) { return { ok: true, items: [] }; } // истории ещё нет — пустой список, не ошибка
+});
+ipcMain.handle('hist:read', async (_e, { file, name } = {}) => {
+  if (!HIST_NAME_RE.test(String(name || ''))) return { error: 'bad name' }; // защита от traversal
+  try { return { ok: true, content: await fs.promises.readFile(path.join(HIST_DIR, histKey(file), name), 'utf8') }; }
+  catch (err) { return { error: String(err.message || err) }; }
 });
 
 // ---------------------------------------------------------------- file watching
@@ -3212,6 +3318,8 @@ ipcMain.on('fs:watch', (_e, root) => {
       const files = [...rec.pending]; rec.pending.clear();
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fs:changed', { root, files });
       const fw = filesWindow(); if (fw) fw.webContents.send('fs:changed', { root, files }); // окно вивера обновляет дерево/файл
+      // локальная история: внешняя правка (агент/git). Большая пачка = массовая операция — шум, пропускаем.
+      if (files.length <= HIST_BATCH_CAP) for (const f of files) histSnapshotFromDisk(f, 'ext');
     }, 180);
   });
   watchers.set(root, rec);
@@ -4126,6 +4234,39 @@ ipcMain.handle('git:fileDiff', async (_e, { root, file }) => {
   }
   return { diff: out || '' };
 });
+// Пара «до/после» одного файла для side-by-side диффа: old = версия из HEAD, new = рабочий файл.
+// Новый (untracked) файл → old:'' ; удалённый с диска → new:''. Бинарь/огромный файл → error (UI
+// откатится на unified-вид).
+ipcMain.handle('git:filePair', async (_e, { root, file } = {}) => {
+  if (!root || !file) return { error: 'no root/file' };
+  const top = await git(root, ['rev-parse', '--show-toplevel']);
+  if (top == null) return { error: 'не git-репозиторий' };
+  const rel = path.relative(top.trim(), file).replace(/\\/g, '/');
+  const oldText = await git(root, ['show', 'HEAD:' + rel]);      // null → файла не было в HEAD
+  let newText = null;
+  try {
+    const st = await fs.promises.stat(file);
+    if (st.isFile() && st.size <= MAX_VIEW_BYTES) newText = await fs.promises.readFile(file, 'utf8');
+    else if (st.isFile()) return { error: 'файл слишком большой' };
+  } catch (_) { /* удалён с диска → null */ }
+  if (oldText == null && newText == null) return { error: 'нет содержимого' };
+  if ((oldText || '').includes('\0') || (newText || '').includes('\0')) return { error: 'бинарный файл' };
+  if ((oldText || '').length > MAX_VIEW_BYTES) return { error: 'файл слишком большой' };
+  return { ok: true, oldText: oldText || '', newText: newText || '' };
+});
+// Пара «родитель/коммит» файла (rel-путь из git:commitFiles) для side-by-side диффа истории.
+ipcMain.handle('git:commitFilePair', async (_e, { root, hash, file } = {}) => {
+  const h = String(hash || '').trim();
+  if (!/^[0-9a-fA-F]{4,40}$/.test(h)) return { error: 'bad hash' };
+  const rel = String(file || '').replace(/\\/g, '/');
+  if (!rel) return { error: 'no file' };
+  const oldText = await git(root, ['show', h + '^:' + rel]);     // null → нет в родителе (новый / первый коммит)
+  const newText = await git(root, ['show', h + ':' + rel]);      // null → удалён этим коммитом
+  if (oldText == null && newText == null) return { error: 'нет содержимого' };
+  if ((oldText || '').includes('\0') || (newText || '').includes('\0')) return { error: 'бинарный файл' };
+  if ((oldText || '').length > MAX_VIEW_BYTES || (newText || '').length > MAX_VIEW_BYTES) return { error: 'файл слишком большой' };
+  return { ok: true, oldText: oldText || '', newText: newText || '' };
+});
 
 // Mutating git for the light panel. GIT_TERMINAL_PROMPT=0 + timeout so a command
 // that would block on auth fails fast with a message instead of hanging the app.
@@ -4148,9 +4289,6 @@ ipcMain.handle('git:info', async (_e, root) => {
   let ahead = 0, behind = 0, upstream = false;
   const counts = await git(root, ['rev-list', '--left-right', '--count', '@{upstream}...HEAD']);
   if (counts != null) { const m = counts.trim().split(/\s+/); behind = +m[0] || 0; ahead = +m[1] || 0; upstream = true; }
-  const last = await git(root, ['log', '-1', '--format=%h\t%s\t%cr\t%an']);
-  let lastCommit = null;
-  if (last && last.trim()) { const [hash, subject, when, author] = last.trim().split('\t'); lastCommit = { hash, subject, when, author }; }
   // Per-branch upstream tracking: имя + upstream + [ahead N, behind M] (по уже зафетченным
   // remote-tracking ref'ам, без сети — как PhpStorm после fetch). Таб-разделитель безопасен:
   // имя ветки таб не содержит, а %(upstream:track) — только пробелы/скобки/запятые.
@@ -4171,7 +4309,7 @@ ipcMain.handle('git:info', async (_e, root) => {
     branchTrack[name] = { upstream: (up || '').trim(), ahead: a, behind: bh, gone };
   }
   const remote = ((await git(root, ['remote'])) || '').trim().split('\n').filter(Boolean);
-  return { repo: true, branch, ahead, behind, upstream, lastCommit, branches, branchTrack, hasRemote: remote.length > 0 };
+  return { repo: true, branch, ahead, behind, upstream, branches, branchTrack, hasRemote: remote.length > 0 };
 });
 // Recent commit history for the Git module's log view (PhpStorm-style). Read-only.
 ipcMain.handle('git:log', async (_e, { root, limit } = {}) => {
@@ -4233,16 +4371,49 @@ async function gitPush(root) {
   }
   return first;
 }
-ipcMain.handle('git:commit', async (_e, { root, message, push, files }) => {
+ipcMain.handle('git:commit', async (_e, { root, message, push, files, amend }) => {
   // files передан → коммитим только выбранное (git add -- <files>), иначе всё (git add -A, как раньше).
+  // amend + files:[] (пустой массив) — особый случай «только поправить сообщение»: ничего не добавляем.
   const sel = Array.isArray(files) && files.length;
-  const add = await gitRun(root, sel ? ['add', '--', ...files] : ['add', '-A']); if (!add.ok) return add;
+  const msgOnly = amend && Array.isArray(files) && !files.length;
+  if (!msgOnly) { const add = await gitRun(root, sel ? ['add', '--', ...files] : ['add', '-A']); if (!add.ok) return add; }
   // sel → коммитим РОВНО выбранные пути (pathspec), иначе `git commit` забрал бы и всё прочее,
   // что уже лежит в индексе (напр. файл, застейдженный при разрешении конфликта и затем снятый галкой).
-  const c = await gitRun(root, sel ? ['commit', '-m', message || 'update', '--', ...files] : ['commit', '-m', message || 'update']); if (!c.ok) return c;
+  const base = amend ? ['commit', '--amend', '-m', message || 'update'] : ['commit', '-m', message || 'update'];
+  const c = await gitRun(root, sel ? [...base, '--', ...files] : base); if (!c.ok) return c;
   // committed:true даже при провале пуша — фронт обязан обновить список (коммит-то уже лёг).
   if (push) { const p = await gitPush(root); if (!p.ok) return { ok: false, committed: true, error: 'Коммит создан, push не прошёл: ' + p.error }; }
   return { ok: true, out: c.out };
+});
+// Последнее сообщение коммита (для подстановки при включении Amend).
+ipcMain.handle('git:lastMessage', async (_e, root) => {
+  const out = await git(root, ['log', '-1', '--format=%B']);
+  return out == null ? { ok: false, message: '' } : { ok: true, message: out.trim() };
+});
+// История одного файла (--follow: переживает переименования) для оверлея «История файла».
+ipcMain.handle('git:fileLog', async (_e, { root, file, limit } = {}) => {
+  if (!root || !file) return { error: 'no root/file' };
+  const n = Math.max(1, Math.min(200, parseInt(limit, 10) || 100));
+  const out = await git(root, ['log', '--follow', `-${n}`, '--pretty=format:%h%x1f%s%x1f%cr%x1f%an', '--', file]);
+  if (out == null) return { error: 'не git-репозиторий или файл не отслеживается' };
+  const commits = [];
+  for (const rec of out.split('\n')) {
+    if (!rec) continue;
+    const [hash, subject, when, author] = rec.split('\x1f');
+    commits.push({ hash, subject, when, author });
+  }
+  return { ok: true, commits };
+});
+// Cherry-pick / revert коммита из лога + полное сообщение коммита (для «Копировать сообщение»).
+const OK_HASH = (h) => /^[0-9a-fA-F]{4,40}$/.test(String(h || '').trim());
+ipcMain.handle('git:cherryPick', async (_e, { root, hash } = {}) =>
+  OK_HASH(hash) ? gitRun(root, ['cherry-pick', String(hash).trim()]) : { ok: false, error: 'bad hash' });
+ipcMain.handle('git:revertCommit', async (_e, { root, hash } = {}) =>
+  OK_HASH(hash) ? gitRun(root, ['revert', '--no-edit', String(hash).trim()]) : { ok: false, error: 'bad hash' });
+ipcMain.handle('git:commitMsg', async (_e, { root, hash } = {}) => {
+  if (!OK_HASH(hash)) return { error: 'bad hash' };
+  const out = await git(root, ['log', '-1', '--format=%B', String(hash).trim()]);
+  return out == null ? { error: 'коммит не найден' } : { ok: true, message: out.trim() };
 });
 // Стейджинг выбранных путей (для пометки конфликта разрешённым и выборочного коммита).
 ipcMain.handle('git:add', async (_e, { root, files }) =>
@@ -4274,7 +4445,6 @@ ipcMain.handle('git:push', async (_e, root) => gitPush(root));
 ipcMain.handle('git:pull', async (_e, root) => gitRun(root, ['pull', '--ff-only']));
 // Stash including untracked (-u) so a quick "спрятать всё" doesn't leave new files behind.
 ipcMain.handle('git:stash', async (_e, root) => gitRun(root, ['stash', 'push', '-u']));
-ipcMain.handle('git:stashPop', async (_e, root) => gitRun(root, ['stash', 'pop']));
 // Revert tracked edits only ('checkout -- .'); untracked files are deliberately kept (no -fd clean).
 ipcMain.handle('git:discardAll', async (_e, root) => gitRun(root, ['checkout', '--', '.']));
 
@@ -4354,7 +4524,9 @@ ipcMain.handle('git:commitFiles', async (_e, { root, hash } = {}) => {
 ipcMain.handle('git:commitFileDiff', async (_e, { root, hash, file } = {}) => {
   const h = String(hash || '').trim();
   if (!/^[0-9a-fA-F]{4,40}$/.test(h)) return { error: 'bad hash' };
-  const out = await git(root, ['show', '--no-color', h, '--', file]);
+  // --format= убирает заголовок коммита из вывода — в центре вивера нужен чистый дифф
+  // (сообщение и так видно в списке истории и в имени вкладки).
+  const out = await git(root, ['show', '--no-color', '--format=', h, '--', file]);
   return { diff: out || '' };
 });
 
