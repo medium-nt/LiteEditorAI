@@ -591,11 +591,53 @@ ipcMain.on('openrouter:chatAbort', (e, { reqId } = {}) => {
 // пользователя, БЕЗ API-ключей (ключевая идея фичи).
 const tpDir = path.join(storeDir, 'textproc');
 ipcMain.handle('tp:dir', () => { try { fs.mkdirSync(tpDir, { recursive: true }); } catch (_) {} return tpDir; });
+// Обработка текста: нативные Открыть/Сохранить как (вместо браузерного File API/download — PR #6).
+// Родитель диалога — окно-отправитель (модульное окно doc), НЕ mainWindow; лимит — как у текстовых панелей.
+ipcMain.handle('tp:openFile', async (e) => {
+  const res = await dialog.showOpenDialog(senderWin(e) || mainWindow, {
+    title: 'Открыть документ', properties: ['openFile'],
+    filters: [
+      { name: 'Документы', extensions: ['md', 'markdown', 'txt', 'html', 'htm'] },
+      { name: 'Все файлы', extensions: ['*'] },
+    ],
+    ...lastDirOpts(),
+  });
+  if (res.canceled || !res.filePaths.length) return { canceled: true };
+  const file = res.filePaths[0];
+  try {
+    const stat = fs.statSync(file);
+    if (stat.size > MAX_VIEW_BYTES) return { ok: false, error: `Файл слишком большой (${Math.round(stat.size / 1024)} КБ, лимит ${Math.round(MAX_VIEW_BYTES / 1024 / 1024)} МБ)` };
+    const content = fs.readFileSync(file, 'utf8');
+    saveState({ lastOpenDir: path.dirname(file) });
+    return { ok: true, file, name: path.basename(file), content };
+  } catch (e2) { return { ok: false, error: 'Не удалось прочитать файл: ' + String(e2.message || e2) }; }
+});
+ipcMain.handle('tp:saveFileAs', async (e, { content, name, ext } = {}) => {
+  const last = loadState().lastOpenDir;
+  const base = String(name || 'Безымянный').replace(/[\/\\:*?"<>|]+/g, '_').replace(/\.[^.]+$/, '');
+  const res = await dialog.showSaveDialog(senderWin(e) || mainWindow, {
+    title: 'Сохранить документ как',
+    defaultPath: path.join(last && fs.existsSync(last) ? last : os.homedir(), `${base}.${ext || 'md'}`),
+    filters: [
+      { name: 'Markdown', extensions: ['md'] },
+      { name: 'HTML', extensions: ['html'] },
+      { name: 'Текст', extensions: ['txt'] },
+    ],
+  });
+  if (res.canceled || !res.filePath) return { canceled: true };
+  try {
+    atomicWriteSync(res.filePath, String(content || ''));
+    saveState({ lastOpenDir: path.dirname(res.filePath) });
+    return { ok: true, file: res.filePath, name: path.basename(res.filePath) };
+  } catch (e2) { return { ok: false, error: String(e2.message || e2) }; }
+});
 
 // Как звать CLI в неинтерактивном режиме и куда подавать промпт (stdin/arg).
+// gemini — официальный Gemini CLI из PATH (идея из PR #6; там был захардкожен macOS-путь Antigravity).
 const TP_AGENTS = {
   claude: { cmd: 'claude', args: ['-p', '--output-format', 'text'], via: 'stdin' },
   codex: { cmd: 'codex', args: ['exec'], via: 'arg' },
+  gemini: { cmd: 'gemini', args: ['-p'], via: 'arg' },
 };
 // GUI-сессия часто не видит ~/.local/bin и nvm-bin → дополняем PATH, чтобы claude/codex нашлись.
 function tpEnv() {
@@ -604,6 +646,9 @@ function tpEnv() {
   return { ...process.env, PATH: extra.join(sep) + sep + (process.env.PATH || '') };
 }
 const tpReqs = new Map(); // reqId -> ChildProcess
+// Живой стриминг ответа в чат (tp:data, идея из PR #6), но через spawn как раньше — БЕЗ PTY:
+// под PTY stderr сливается в stdout, CLI видит TTY (спиннеры/контрол-коды), терминал эхоит промпт,
+// а \x04 не является EOF под ConPTY (Windows зависал бы до таймаута). stdout чист — стримим как есть.
 ipcMain.on('tp:run', (e, { reqId, agent, prompt } = {}) => {
   const sender = e.sender;
   const conf = TP_AGENTS[agent] || TP_AGENTS.claude;
@@ -614,7 +659,7 @@ ipcMain.on('tp:run', (e, { reqId, agent, prompt } = {}) => {
   tpReqs.set(reqId, child);
   let out = '', errOut = '';
   const to = setTimeout(() => { if (tpReqs.has(reqId)) { tpReqs.delete(reqId); try { child.kill(); } catch (_) {} safeSend(sender, 'tp:error', { reqId, error: 'таймаут (агент не ответил вовремя)' }); } }, 240000);
-  child.stdout.on('data', (c) => { out += c.toString('utf8'); });
+  child.stdout.on('data', (c) => { const chunk = c.toString('utf8'); out += chunk; safeSend(sender, 'tp:data', { reqId, chunk }); });
   child.stderr.on('data', (c) => { errOut += c.toString('utf8'); });
   child.on('error', (err) => {
     if (!tpReqs.has(reqId)) return; tpReqs.delete(reqId); clearTimeout(to);
@@ -2548,6 +2593,7 @@ let filesViewerReady = false;
 const pendingViewerOpens = [];
 let pendingFocusGit = false;        // «Git» нажат до готовности окна → фокус секции после viewerReady
 function filesWindow() { const w = moduleWindows.get('files'); return (w && !w.isDestroyed()) ? w : null; }
+function docWindow() { const w = moduleWindows.get('doc'); return (w && !w.isDestroyed()) ? w : null; } // «Обработка текста»: сайдбар-дерево следит за диском
 function routeOpenInViewer(payload) {
   if (!filesWindow()) openModuleWindow('files'); // откроет окно (и переключит на активный проект)
   const w = filesWindow();
@@ -3368,6 +3414,7 @@ const isIgnoredPath = (rel) => rel.split(/[\\/]/).some((seg) => IGNORE_DIRS.has(
 function notifyWatchEnded(root) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fs:watchEnded', { root });
   const fw = filesWindow(); if (fw) fw.webContents.send('fs:watchEnded', { root });
+  const dw = docWindow(); if (dw) dw.webContents.send('fs:watchEnded', { root });
 }
 ipcMain.on('fs:watch', (_e, root) => {
   if (!root || watchers.has(root) || !fs.existsSync(root)) return;
@@ -3386,6 +3433,7 @@ ipcMain.on('fs:watch', (_e, root) => {
       const files = [...rec.pending]; rec.pending.clear();
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fs:changed', { root, files });
       const fw = filesWindow(); if (fw) fw.webContents.send('fs:changed', { root, files }); // окно вивера обновляет дерево/файл
+      const dw = docWindow(); if (dw) dw.webContents.send('fs:changed', { root, files }); // «Обработка текста»: сайдбар-дерево
       // локальная история: внешняя правка (агент/git). Большая пачка = массовая операция — шум, пропускаем.
       if (files.length <= HIST_BATCH_CAP) for (const f of files) histSnapshotFromDisk(f, 'ext');
     }, 180);
