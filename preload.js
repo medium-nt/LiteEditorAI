@@ -391,6 +391,8 @@ contextBridge.exposeInMainWorld('lite', {
     execKill: (execId) => ipcRenderer.send('containers:execKill', { execId }),
     onExecData: (cb) => { const h = (_e, p) => cb(p); ipcRenderer.on('containers:execData', h); return () => ipcRenderer.removeListener('containers:execData', h); },
     onExecExit: (cb) => { const h = (_e, p) => cb(p); ipcRenderer.on('containers:execExit', h); return () => ipcRenderer.removeListener('containers:execExit', h); },
+    inspectDb: (engine, id) => ipcRenderer.invoke('containers:inspectDb', { engine, id }), // заготовка подключения к БД контейнера
+    inspectMq: (engine, id) => ipcRenderer.invoke('containers:inspectMq', { engine, id }), // заготовка профиля RabbitMQ контейнера
   },
 
   db: {
@@ -415,6 +417,37 @@ contextBridge.exposeInMainWorld('lite', {
     saveText: (defaultName, text) => ipcRenderer.invoke('db:saveText', { defaultName, text }),
     openText: () => ipcRenderer.invoke('db:openText'),
     chooseDir: () => ipcRenderer.invoke('db:chooseDir'),
+    // «Контейнеры» → «Базы данных»: маршрут через main (окно БД откроется само, очередь до готовности)
+    openFromContainer: (payload) => ipcRenderer.send('db:openFromContainer', payload),
+    onOpenFromContainer: (cb) => { const h = (_e, p) => cb(p); ipcRenderer.on('db:openFromContainer', h); return () => ipcRenderer.removeListener('db:openFromContainer', h); },
+    panelReady: () => ipcRenderer.send('db:panelReady'),
+  },
+  // RabbitMQ module — server profiles + management HTTP API (lib/rmq.js).
+  rmq: {
+    list: () => ipcRenderer.invoke('rmq:list'),
+    save: (conn) => ipcRenderer.invoke('rmq:save', { conn }),
+    delete: (id) => ipcRenderer.invoke('rmq:delete', { id }),
+    test: (conn) => ipcRenderer.invoke('rmq:test', { conn }),
+    overview: (id, age) => ipcRenderer.invoke('rmq:overview', { id, age }),
+    vhosts: (id) => ipcRenderer.invoke('rmq:vhosts', { id }),
+    queues: (id, vhost, spark) => ipcRenderer.invoke('rmq:queues', { id, vhost, spark }),
+    exchanges: (id, vhost) => ipcRenderer.invoke('rmq:exchanges', { id, vhost }),
+    connections: (id) => ipcRenderer.invoke('rmq:connections', { id }),
+    queueBindings: (id, vhost, queue) => ipcRenderer.invoke('rmq:queueBindings', { id, vhost, queue }),
+    peek: (id, vhost, queue, count) => ipcRenderer.invoke('rmq:peek', { id, vhost, queue, count }),
+    publish: (id, vhost, exchange, routingKey, payload, properties) => ipcRenderer.invoke('rmq:publish', { id, vhost, exchange, routingKey, payload, properties }),
+    purge: (id, vhost, queue) => ipcRenderer.invoke('rmq:purge', { id, vhost, queue }),
+    deleteQueue: (id, vhost, queue) => ipcRenderer.invoke('rmq:deleteQueue', { id, vhost, queue }),
+    killConnection: (id, name) => ipcRenderer.invoke('rmq:killConnection', { id, name }),
+    // live-tail exchange: временная очередь → стрим сообщений в окно
+    tailStart: (id, vhost, exchange, routingKey, streamId) => ipcRenderer.invoke('rmq:tailStart', { id, vhost, exchange, routingKey, streamId }),
+    tailStop: (streamId) => ipcRenderer.send('rmq:tailStop', { streamId }),
+    onTailData: (cb) => { const h = (_e, p) => cb(p); ipcRenderer.on('rmq:tailData', h); return () => ipcRenderer.removeListener('rmq:tailData', h); },
+    onTailExit: (cb) => { const h = (_e, p) => cb(p); ipcRenderer.on('rmq:tailExit', h); return () => ipcRenderer.removeListener('rmq:tailExit', h); },
+    // «Контейнеры» → RabbitMQ: маршрут через main (окно откроется само, очередь до готовности)
+    openFromContainer: (payload) => ipcRenderer.send('rmq:openFromContainer', payload),
+    onOpenFromContainer: (cb) => { const h = (_e, p) => cb(p); ipcRenderer.on('rmq:openFromContainer', h); return () => ipcRenderer.removeListener('rmq:openFromContainer', h); },
+    panelReady: () => ipcRenderer.send('rmq:panelReady'),
   },
   // RemoteHost module — SSH connection profiles + live shell sessions.
   rh: {
