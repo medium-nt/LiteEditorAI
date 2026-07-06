@@ -2605,11 +2605,13 @@ ipcMain.on('editor:openInViewer', (_e, payload) => routeOpenInViewer(payload));
 // каждый экспорт в своей подпапке) и роутим обычный openInViewer. Используют: экспорт результата
 // SQL-запроса (CSV/JSON), просмотр файла из контейнера, правка удалённого файла (SFTP) и т.п.
 function stageTextForViewer(name, content) {
+  // Контент бывает чувствительным (SQL-выгрузки, конфиги с хоста) → каталог 0700 / файл 0600,
+  // имя каталога — из CSPRNG (общий /tmp, соседний юзер не должен ни читать, ни угадать путь).
   const base = String(name || 'export.txt').replace(/[\/\\:*?"<>|]/g, '_').slice(0, 120) || 'export.txt';
-  const dir = path.join(os.tmpdir(), 'lite-editor-view', Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36));
-  fs.mkdirSync(dir, { recursive: true });
+  const dir = path.join(os.tmpdir(), 'lite-editor-view', Date.now().toString(36) + crypto.randomBytes(9).toString('hex'));
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, base);
-  fs.writeFileSync(file, String(content == null ? '' : content), 'utf8');
+  fs.writeFileSync(file, String(content == null ? '' : content), { encoding: 'utf8', mode: 0o600 });
   return file;
 }
 ipcMain.handle('editor:openTextInViewer', (_e, { name, content } = {}) => {
@@ -4842,7 +4844,7 @@ function containerRun(cli, args, opts = {}) {
   });
 }
 // Переключить окно «Контейнеры» на docker/podman удалённого хоста (или назад на локальный, rhId=null).
-ipcMain.handle('containers:remoteSet', async (_e, { rhId } = {}) => {
+ipcMain.handle('containers:remoteSet', async (_e, { rhId, engine } = {}) => {
   if (!rhId) {
     if (containersRemote) { try { rhApi.closeTunnel(containersRemote.tunId); } catch (_) {} containersRemote = null; }
     return { ok: true, rhId: null };
@@ -4851,8 +4853,19 @@ ipcMain.handle('containers:remoteSet', async (_e, { rhId } = {}) => {
   if (!conn) return { ok: false, error: 'SSH-профиль не найден' };
   const scan = await rhApi.scan(rhId);
   if (!scan.ok) return { ok: false, error: 'Скан хоста не удался: ' + (scan.error || '') };
-  const sockPath = (scan.sockets && (scan.sockets.docker || scan.sockets.podman)) || null;
-  if (!sockPath) return { ok: false, error: 'На хосте нет docker/podman-сокета (docker.sock / podman.sock не найдены)' };
+  // hint 'podman-socket' → UI предложит включить socket-activated сервис по SSH
+  const podmanHint = { ok: false, hint: 'podman-socket', error: 'Podman на хосте установлен, но API-сокет спит (systemctl --user enable --now podman.socket)' };
+  const socks = scan.sockets || {};
+  let sockPath = null;
+  if (engine === 'docker' || engine === 'podman') { // явный выбор (из модалки или запомненный) — строго его сокет
+    sockPath = socks[engine] || null;
+    if (!sockPath) return (engine === 'podman' && scan.podmanCli) ? podmanHint : { ok: false, error: `На хосте нет сокета ${engine}` };
+  } else if (socks.docker && socks.podman) {
+    return { ok: true, needChoice: true }; // оба движка — пусть выберет пользователь (ok:true — не ошибка, без WARN в логе)
+  } else {
+    sockPath = socks.docker || socks.podman || null;
+    if (!sockPath) return scan.podmanCli ? podmanHint : { ok: false, error: 'На хосте нет docker/podman-сокета (docker.sock / podman.sock не найдены)' };
+  }
   const isPodman = sockPath.includes('podman');
   // Локальный клиент: docker CLI говорит и с Docker, и с podman-сокетом (compat API);
   // podman CLI (remote) — только с podman-сервисом.

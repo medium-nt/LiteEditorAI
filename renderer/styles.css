@@ -1370,6 +1370,9 @@ body.preview-split #preview-view { border-left: 1px solid var(--border); }
 .docker-tab.on { color: var(--green-contrast, #06241a); background: var(--green); border-color: var(--green); }
 .docker-tab.off { opacity: 0.5; }
 .docker-tab.off::after { content: "•"; color: var(--text-mute); }
+/* серая ссылка на не-дефолтной вкладке: закрепить её как дефолтную (станет первой) */
+.docker-def-link { border: none; background: none; align-self: center; padding: 4px 2px; font-size: 11px; color: var(--text-mute); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+.docker-def-link:hover { color: var(--text-dim); text-decoration: underline; }
 .docker-body { flex: 1; overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
 .docker-env { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-input); }
 .docker-env-row { display: flex; align-items: baseline; gap: 7px; font-size: 11.5px; }
@@ -1409,6 +1412,11 @@ body.preview-split #preview-view { border-left: 1px solid var(--border); }
 .drow-act.dmq:hover { color: var(--warn); border-color: var(--warn); background: var(--bg-input); }
 .drow-act.dweb { color: var(--info); }                                        /* задетекчен веб-сервис → «наблюдать в Мониторинге сайтов» */
 .drow-act.dweb:hover { color: var(--info); border-color: var(--info); background: var(--bg-input); }
+.drow-act.dopen { color: var(--accent); }                                     /* есть published-порт → «открыть в браузере» */
+.drow-act.dopen:hover { color: var(--accent); border-color: var(--accent); background: var(--bg-input); }
+.drow-act.dtun { color: var(--green); }                                       /* активный SSH-туннель к порту контейнера */
+.drow-act.dtun:hover { color: var(--green-bright); border-color: var(--green); }
+.dportdd-copy { width: 22px; height: 22px; margin-left: auto; flex: 0 0 auto; } /* мини-копирование в выпадашке портов */
 /* селектор хоста контейнеров (локально / SSH-хост) + бейдж удалённого контекста */
 .docker-host-btn {
   display: inline-flex; align-items: center; gap: 6px; margin-left: auto; align-self: center;
@@ -1422,6 +1430,7 @@ body.preview-split #preview-view { border-left: 1px solid var(--border); }
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 10px; font-size: 12px; font-weight: 600;
   border-radius: 8px; background: var(--accent-soft); color: var(--green-bright);
+  cursor: pointer; /* клик — список активных туннелей хоста */
 }
 .runsql-row.on { border-color: var(--border-accent); background: var(--accent-soft); }
 /* модалка «Сервисы хоста» (Удалённые хосты → скан + связки через туннель) */
@@ -4307,3 +4316,26 @@ body.mw-doc .modal label { color: #1a1a1c !important; }
 }
 .tp-dd-item:hover { background: rgba(0,0,0,0.06); }
 .tp-dd-item.active { background: rgba(0,0,0,0.04); font-weight: 500; }
+
+/* ---------------------------------------------------------------- рамка окна
+   Тонкий бордер по периметру ВСЕГО окна (редактор и каждое окно модуля): тёмное окно
+   на тёмном рабочем столе остаётся различимым, не становясь акцентом. Управление —
+   renderer/frame.js (applyFrame): классы win-frame / win-frame-pulse + переменные
+   --frame-c1 / --frame-c2 / --frame-period. Цвет выбирает пользователь из палитры
+   FRAME_COLORS (настройки → «Рамка окна»), поэтому токены темы здесь не участвуют. */
+body.win-frame::after {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 99999;
+  border: 1px solid var(--frame-c1);
+}
+body.win-frame.win-frame-pulse::after {
+  animation: win-frame-pulse var(--frame-period, 6s) ease-in-out infinite;
+}
+@keyframes win-frame-pulse {
+  0%, 100% { border-color: var(--frame-c1); }
+  50%      { border-color: var(--frame-c2); }
+}
+/* сватчи выбора цвета рамки в настройках */
+.frame-swatches { display: flex; gap: 7px; flex-wrap: wrap; padding: 2px 0; }
+.frame-sw { width: 24px; height: 24px; border-radius: 7px; border: 1px solid var(--border); cursor: pointer; padding: 0; transition: transform .1s; }
+.frame-sw:hover { transform: scale(1.12); }
+.frame-sw.sel { outline: 2px solid var(--border-accent); outline-offset: 1px; }
