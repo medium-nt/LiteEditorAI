@@ -211,6 +211,67 @@ function foregroundKind(shellPid) {
   return running ? 'running' : 'waiting';
 }
 
+// ── Windows: detect agent state via ~/.claude/sessions/<pid>.json ──────────────
+// foregroundKind() above is Linux-only (/proc). On Windows we locate the claude
+// DESCENDANT of the PTY shell and read the status Claude Code writes itself.
+// Same vocabulary as foregroundKind: 'running' | 'waiting' | 'shell' | null.
+let _winProcSnap = null, _winProcSnapAt = 0;
+function winProcessSnapshot() {
+  // Cached (~1s) {pid,ppid}[] via Get-CimInstance. Returns a Promise so the IPC
+  // handler stays non-blocking — a fresh snapshot is ~50-150ms and must not freeze UI.
+  return new Promise((resolve) => {
+    const now = Date.now();
+    if (_winProcSnap && now - _winProcSnapAt < 1000) return resolve(_winProcSnap);
+    execFile('powershell',
+      ['-NoProfile', '-NonInteractive', '-Command',
+       'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress'],
+      { windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) { _winProcSnap = []; _winProcSnapAt = now; return resolve(_winProcSnap); }
+        try {
+          const arr = JSON.parse(stdout);
+          const list = Array.isArray(arr) ? arr : [arr];
+          _winProcSnap = list.map((p) => ({ pid: +p.ProcessId, ppid: +p.ParentProcessId }));
+        } catch (_) { _winProcSnap = []; }
+        _winProcSnapAt = now;
+        resolve(_winProcSnap);
+      });
+  });
+}
+
+// BFS descendants of shellPid; return the first pid that has ~/.claude/sessions/<pid>.json.
+// Claude Code writes its session file keyed by its own pid → install-agnostic marker
+// (works for claude.exe and node.exe alike; ignores claude's own tool subprocesses).
+async function findClaudePid(shellPid) {
+  const snap = await winProcessSnapshot();
+  if (!snap.length) return null;
+  const children = new Map();
+  for (const p of snap) { if (!children.has(p.ppid)) children.set(p.ppid, []); children.get(p.ppid).push(p.pid); }
+  const queue = [shellPid]; const seen = new Set([shellPid]);
+  while (queue.length) {
+    const pid = queue.shift();
+    if (pid !== shellPid) {
+      try { if (fs.existsSync(path.join(os.homedir(), '.claude', 'sessions', `${pid}.json`))) return pid; } catch (_) {}
+    }
+    for (const c of (children.get(pid) || [])) if (!seen.has(c)) { seen.add(c); queue.push(c); }
+  }
+  return null;
+}
+
+// Windows counterpart of foregroundKind: maps Claude Code session status → UI kind.
+async function foregroundKindWindows(shellPid) {
+  const claudePid = await findClaudePid(shellPid);
+  if (!claudePid) return null;                 // no claude in this PTY → caller's text fallback
+  let status;
+  try { status = JSON.parse(fs.readFileSync(
+    path.join(os.homedir(), '.claude', 'sessions', `${claudePid}.json`), 'utf8')).status; }
+  catch (_) { return null; }
+  if (status === 'busy') return 'running';
+  if (status === 'waiting') return 'waiting';
+  if (status === 'idle') return 'shell';
+  return null;
+}
+
 const IGNORE_DIRS = new Set([
   '.git', 'node_modules', '__pycache__', '.venv', 'venv',
   'dist', 'build', '.next', 'target', '.cache', '.idea',
@@ -2873,9 +2934,11 @@ ipcMain.on('pty:kill', (_e, { id }) => {
   if (p) { try { p.kill(); } catch (_) {} ptys.delete(id); }
 });
 // 'shell' | 'running' | 'waiting' | null — see foregroundKind().
-ipcMain.handle('pty:foregroundState', (_e, { id }) => {
+ipcMain.handle('pty:foregroundState', async (_e, { id }) => {
   const p = ptys.get(id);
-  return p ? foregroundKind(p.pid) : null;
+  if (!p) return null;
+  if (process.platform === 'win32') return foregroundKindWindows(p.pid); // ~/.claude/sessions based
+  return foregroundKind(p.pid);
 });
 
 // ---------------------------------------------------------------- Монитор ресурсов
