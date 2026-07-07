@@ -277,7 +277,7 @@ function makeCard(p) {
   const head = el('div', 'card-head');
   const ind = el('span', 'pind ' + projAggState(p.id));
   ind.dataset.id = p.id;
-  ind.title = 'Спиннер — работает · янтарный — ждёт ответа · точка — готов';
+  ind.title = '✓ готов · спиннер работает · красный ждёт ответа · ≡ план · </> код · ▶ команда · ⊙ поиск';
   const title = el('span', 'card-title', p.name);
   title.title = p.path;
   const star = iconBtn('card-star' + (p.favorite ? ' on' : ''), 'star', p.favorite ? 'Убрать из избранного' : 'В избранное', 15);
@@ -844,6 +844,9 @@ function markActivity(id, data) {
   if (echoLike) return;
   rec.tail = stripAnsi((rec.tail || '') + (data || '')).slice(-400);
   rec.activitySeq = (rec.activitySeq || 0) + 1; // lets a pending settle detect that new output arrived
+  // CC session status (Windows, via pty:ccstate) drives busy/waiting/idle — don't flip to busy
+  // from raw PTY byte flow, which fires on local echo/paste; and skip the PTY-idle settle too.
+  if (rec.ccState) return;
   if (projState.get(id) !== 'busy') { rec.busyStart = Date.now(); setProjState(id, 'busy'); }
   clearTimeout(rec.idleTimer);
   rec.idleTimer = setTimeout(() => settleProject(id), settings.idleMs);
@@ -874,6 +877,29 @@ async function settleProject(id) {
   const pid = rec.projId;
   // notify per project when its turn ended on a non-visible tab (or app unfocused)
   if (worked && (id !== activeSessionId() || !document.hasFocus())) notifyAgent(pid, waiting ? 'waiting' : 'quiet');
+}
+
+// Merge native CC status (`kind`) with the granular `activity` from activity-hook.ps1 into one
+// of 7 UI states. Priority: native waiting → red pulse; activity=question → same red pulse
+// (Notification ≈ "wants input"); native idle → quiet (done); busy + fresh activity → the
+// activity (plan/code/exec/search); busy without fresh activity → plain busy spinner.
+// `aTs` is epoch-seconds from the hook; we ignore activity older than 60s (stale after idle —
+// activity.json is never cleared, so without TTL a long-finished search would linger over busy).
+function mergeCcState(kind, activity, aTs) {
+  const fresh = !!(activity && aTs && (Date.now() / 1000 - aTs) < 60);
+  if (kind === 'waiting') return 'waiting';
+  if (activity === 'question') return 'waiting';
+  if (kind === 'shell') return 'quiet';
+  if (kind === 'running') {
+    if (fresh) {
+      if (activity === 'plan') return 'plan';
+      if (activity === 'code') return 'code';
+      if (activity === 'exec') return 'exec';
+      if (activity === 'search') return 'search';
+    }
+    return 'busy';
+  }
+  return null;
 }
 
 let lastNotifyAt = 0;
@@ -940,9 +966,13 @@ async function openFromTerminal(projPath, raw) {
 // (projTabs store); PTYs don't, so tabs are recreated empty on next launch.
 function activeSessionId() { const t = tabsByProj.get(activeId); return t ? t.active : null; }
 function projSessions(projId) { const t = tabsByProj.get(projId); return t ? t.sessions : []; }
+// Aggregate state across a project's sessions, by attention priority: a question/waiting wins,
+// then concrete activity (exec/code/search/plan) over a plain busy spinner, then quiet, then paused.
 function projAggState(projId) {
   const ss = projSessions(projId).map((s) => projState.get(s));
-  return ss.includes('busy') ? 'busy' : ss.includes('waiting') ? 'waiting' : 'quiet';
+  const rank = ['waiting', 'exec', 'code', 'search', 'plan', 'busy', 'quiet', 'paused'];
+  for (const r of rank) if (ss.includes(r)) return r;
+  return 'quiet';
 }
 function refreshProjIndicator(projId) {
   const st = projAggState(projId);
@@ -1035,7 +1065,7 @@ function createSession(proj, name) {
     },
   });
   term.registerLinkProvider(fileLinkProvider(term, proj.path));
-  const rec = { term, fit, search, container, projId: proj.id, name, idleTimer: null, sawBell: false, tail: '', busyStart: 0, lastInputAt: 0, activitySeq: 0 };
+  const rec = { term, fit, search, container, projId: proj.id, name, idleTimer: null, sawBell: false, tail: '', busyStart: 0, lastInputAt: 0, activitySeq: 0, ccState: null };
   terms.set(id, rec);
   tabsByProj.get(proj.id).sessions.push(id);
   // «Контекст»: тихая автосборка — новая сессия агента должна найти готовый CLAUDE.md/AGENTS.md,
@@ -2868,6 +2898,26 @@ function init() {
     const rec = terms.get(id);
     if (rec) rec.term.write('\r\n\x1b[90m[процесс завершён — закрой и переоткрой проект]\x1b[0m\r\n');
     setProjState(id, 'quiet');
+  });
+  // CC session status (Windows, polled from main) is the authoritative busy/waiting/idle signal —
+  // applied directly, bypassing the PTY byte-flow "busy" that fires on local echo/paste. The poll
+  // also carries `activity` (plan/code/exec/search/question from activity-hook.ps1) which merges
+  // with `kind` into one of 7 UI states (search/code/exec/plan/busy/waiting/quiet).
+  lite.pty.onCcState(({ id, kind, activity, lastTool, aTs }) => {
+    const rec = terms.get(id);
+    if (!rec) return;
+    const prev = projState.get(id);
+    rec.ccState = kind || null;        // still gates markActivity's PTY-flow busy
+    rec.activity = activity || null;   // for tooltip ("ищет · Grep" etc.)
+    rec.lastTool = lastTool || null;
+    const st = mergeCcState(kind, activity, aTs);
+    if (!st) return;
+    setProjState(id, st);
+    // CC status is authoritative — mirror settleProject's attention notifications: announce "waiting"
+    // (agent wants input) and "quiet" right after a busy spell genuinely ended.
+    if (st === 'waiting' || (st === 'quiet' && prev !== 'quiet' && prev !== 'waiting')) {
+      if (id !== activeSessionId() || !document.hasFocus()) notifyAgent(rec.projId, st);
+    }
   });
   // RemoteHost — SSH-сессии (отдельный канал, не PTY): пишем вывод в соответствующий xterm.
   // Пульт выбрал вкладку → синхронизируем активную на десктопе.

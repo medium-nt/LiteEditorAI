@@ -345,14 +345,27 @@ body.viewer-zen #vcs-topbar { display: none !important; }
 .pgroup.pinned .pgroup-name { color: #e0c060; }
 .pgroup-body { padding-top: 2px; padding-bottom: 4px; }
 
-/* activity indicator: spinner while the console is producing output, accent dot when quiet */
-.pind { flex: 0 0 10px; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; }
-.pind.quiet { background: var(--green); box-shadow: 0 0 7px var(--accent-glow); }
+/* activity indicator: spinner while working, glyph coloured by WHAT the agent does.
+   7 states — quiet ✓ / busy spinner / waiting red pulse / plan ≡ / code </> / exec ▶ / search ⊙
+   (busy/waiting keep an animated round backdrop; the rest render a Unicode glyph via ::before). */
+.pind { flex: 0 0 16px; width: 16px; height: 16px; border-radius: 50%; box-sizing: border-box;
+        display: inline-flex; align-items: center; justify-content: center;
+        font-size: 13px; line-height: 1; font-weight: 700; }
+
+.pind.quiet::before { content: '✓'; color: var(--green); }                         /* готов */
 .pind.busy { background: transparent; border: 2px solid rgba(224,175,104,0.3); border-top-color: var(--warn); animation: pind-spin 0.7s linear infinite; }
-/* waiting = quiet but looks like it wants input from you (amber pulse) */
-.pind.waiting { background: var(--warn); box-shadow: 0 0 0 0 rgba(224,175,104,0.7); animation: pind-pulse 1.3s ease-out infinite; }
+/* waiting = agent wants your input → bright red pulse */
+.pind.waiting { background: #ff1f1f; box-shadow: 0 0 8px 2px rgba(255,31,31,0.85); animation: pind-pulse 1s ease-in-out infinite; }
+
+/* activity (busy + which tool) — glyph coloured, transparent backdrop */
+.pind.plan::before   { content: '≡';    color: #4C9BE8; }                           /* синий — план */
+.pind.code::before   { content: '<\/>'; color: #3FB6C6; font-size: 9px; font-weight: 800; }  /* голубой — код (3 символа мельче) */
+.pind.exec::before   { content: '▶';    color: #E07B3A; }                           /* оранжевый — команда */
+.pind.search::before { content: '⊙';    color: #D29922; }                           /* жёлтый — поиск */
+.pind.paused::before { content: '‖';    color: #7A7A8C; }                           /* серый — пауза (ручная) */
+
 @keyframes pind-spin { to { transform: rotate(360deg); } }
-@keyframes pind-pulse { 70% { box-shadow: 0 0 0 7px rgba(224,175,104,0); } 100% { box-shadow: 0 0 0 0 rgba(224,175,104,0); } }
+@keyframes pind-pulse { 0%, 100% { box-shadow: 0 0 5px 1px rgba(255,31,31,0.7); transform: scale(1); } 50% { box-shadow: 0 0 14px 5px rgba(255,31,31,0.25); transform: scale(1.15); } }
 
 /* card being dragged (DnD-сортировка внутри «Избранного») */
 .card.dragging { opacity: .4; }

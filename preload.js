@@ -535,6 +535,7 @@ contextBridge.exposeInMainWorld('lite', {
     kill: (id) => ipcRenderer.send('pty:kill', { id }),
     restart: (opts) => ipcRenderer.invoke('pty:restart', opts),
     foregroundState: (id) => ipcRenderer.invoke('pty:foregroundState', { id }),
+    onCcState: (cb) => { const h = (_e, payload) => cb(payload); ipcRenderer.on('pty:ccstate', h); return () => ipcRenderer.removeListener('pty:ccstate', h); },
     onData: (cb) => {
       const h = (_e, payload) => cb(payload);
       ipcRenderer.on('pty:data', h);

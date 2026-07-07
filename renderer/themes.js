@@ -5,8 +5,8 @@
 export const TERM_THEME = {
   background: '#0d1116', foreground: '#cdd6e0', cursor: '#34d399',
   selectionBackground: '#1f3a4d',
-  black: '#0d1116', red: '#f7768e', green: '#9ece6a', yellow: '#e0af68',
-  blue: '#7aa2f7', magenta: '#bb9af7', cyan: '#7dcfff', white: '#a9b1d6',
+  black: '#0d1116', red: '#C80000', green: '#00cd00', yellow: '#cdcd00',
+  blue: '#0000ff', magenta: '#cd00cd', cyan: '#3399cc', white: '#e6e6e6',
 };
 export const DEFAULT_THEME = 'neumorphism';
 export const THEMES = {

@@ -258,6 +258,40 @@ async function findClaudePid(shellPid) {
   return null;
 }
 
+// Reads sessions/<claudePid>.activity.json (written by activity-hook.ps1 via CC hooks:
+// ExitPlanMode→plan, Edit/Write→code, Bash/PowerShell→exec, Explore/Grep/Read→search,
+// Notification→question). Returns {activity,lastTool,ts}|null — never throws.
+function readClaudeActivity(claudePid) {
+  try {
+    const f = path.join(os.homedir(), '.claude', 'sessions', `${claudePid}.activity.json`);
+    const obj = JSON.parse(fs.readFileSync(f, 'utf8'));
+    return obj || null;
+  } catch (_) { return null; }
+}
+
+// Combined CC state for the poll loop: kind (from native status) + activity (from
+// activity-hook's .activity.json) resolved in a single descendant BFS — avoids a
+// second findClaudePid call. Same kind vocabulary as foregroundKindWindows.
+async function ccStateWindows(shellPid) {
+  const claudePid = await findClaudePid(shellPid);
+  if (!claudePid) return null;
+  let kind = null;
+  try {
+    const status = JSON.parse(fs.readFileSync(
+      path.join(os.homedir(), '.claude', 'sessions', `${claudePid}.json`), 'utf8')).status;
+    if (status === 'busy') kind = 'running';
+    else if (status === 'waiting') kind = 'waiting';
+    else if (status === 'idle') kind = 'shell';
+  } catch (_) {}
+  const act = readClaudeActivity(claudePid);
+  return {
+    kind,
+    activity: (act && act.activity) || null,
+    lastTool: (act && act.lastTool) || null,
+    aTs: (act && act.ts) || null,
+  };
+}
+
 // Windows counterpart of foregroundKind: maps Claude Code session status → UI kind.
 async function foregroundKindWindows(shellPid) {
   const claudePid = await findClaudePid(shellPid);
@@ -2940,6 +2974,22 @@ ipcMain.handle('pty:foregroundState', async (_e, { id }) => {
   if (process.platform === 'win32') return foregroundKindWindows(p.pid); // ~/.claude/sessions based
   return foregroundKind(p.pid);
 });
+
+// On Windows, CC's own session status is the authoritative busy/waiting/idle signal:
+// raw PTY byte flow fires on local echo / paste too, which the front would misread as "busy".
+// Poll it for every live PTY and push to the owner window (the front applies it directly).
+// Payload carries both native `kind` (busy/waiting/idle) and `activity` (plan/code/exec/search/
+// question) from activity-hook.ps1 — the front merges them into one of 7 UI states.
+if (process.platform === 'win32') {
+  setInterval(() => {
+    for (const [id, p] of ptys) {
+      ccStateWindows(p.pid).then((s) => {
+        if (!s) return;
+        try { sendToOwner(id, 'pty:ccstate', { id, kind: s.kind, activity: s.activity, lastTool: s.lastTool, aTs: s.aTs }); } catch (_) {}
+      });
+    }
+  }, 700);
+}
 
 // ---------------------------------------------------------------- Монитор ресурсов
 // Самонаблюдение за потреблением. Снимок раздельно по двум мирам:
