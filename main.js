@@ -4825,7 +4825,7 @@ ipcMain.handle('git:branchDiffWorktree', async (_e, { root, branch } = {}) => {
 // Удалённый контекст («Удалённые хосты» → Контейнеры): SSH-туннель до docker/podman-сокета хоста
 // (rh:sockTunnel), все CLI-вызовы идут с DOCKER_HOST/CONTAINER_HOST=tcp://127.0.0.1:<port>.
 // Контекст один на процесс (окно «Контейнеры» одно на тип); opts.local=true обходит подмену.
-let containersRemote = null; // { rhId, name, tunId, port, cli }
+let containersRemote = null; // { rhId, name, tunId, port, cli, sockPath }
 function cRemoteCtx(cli, baseEnv) {
   if (!containersRemote) return { cli, env: undefined };
   const env = { ...(baseEnv || process.env) };
@@ -4834,7 +4834,8 @@ function cRemoteCtx(cli, baseEnv) {
   return { cli: containersRemote.cli, env };
 }
 function containerRun(cli, args, opts = {}) {
-  const ctx = opts.local ? { cli } : cRemoteCtx(cli);
+  // opts.env — явное окружение (проба свежего туннеля ДО фиксации containersRemote); opts.local — форс-локальный
+  const ctx = opts.env ? { cli, env: opts.env } : (opts.local ? { cli } : cRemoteCtx(cli));
   return new Promise((resolve) => {
     execFile(ctx.cli, args, { timeout: opts.timeout || 15000, maxBuffer: 24 * 1024 * 1024, windowsHide: true, env: ctx.env },
       (err, stdout, stderr) => resolve({
@@ -4855,15 +4856,41 @@ ipcMain.handle('containers:remoteSet', async (_e, { rhId, engine } = {}) => {
   if (!scan.ok) return { ok: false, error: 'Скан хоста не удался: ' + (scan.error || '') };
   // hint 'podman-socket' → UI предложит включить socket-activated сервис по SSH
   const podmanHint = { ok: false, hint: 'podman-socket', error: 'Podman на хосте установлен, но API-сокет спит (systemctl --user enable --now podman.socket)' };
+  // Сокет есть, но у SSH-пользователя нет прав (sshd открывает его от имени пользователя) —
+  // без этой проверки CLI через туннель видел бы только голый «EOF». hint 'sock-access' → UI покажет
+  // диагностику; если на хосте доступен sudo (NOPASSWD или пароль = паролю профиля) — предложит
+  // кнопку «Починить по SSH» (canFix + fix из белого списка C_FIX_SCRIPTS, исполняет containers:remoteFix).
+  const user = conn.user || '<user>';
+  const denied = scan.denied || {};
+  const deniedErr = async (eng) => {
+    // sudo-детект: free (NOPASSWD) / need-pass / no. Пароль профиля пробуем только для password-профилей.
+    const s = await rhApi.exec(rhId, 'command -v sudo >/dev/null 2>&1 && { sudo -n true 2>/dev/null && echo sudo=free || echo sudo=need-pass; } || echo sudo=no', 12000);
+    const mode = /sudo=free/.test(s.stdout || '') ? 'free' : (/sudo=need-pass/.test(s.stdout || '') ? 'need-pass' : 'no');
+    const canFix = mode === 'free' || (mode === 'need-pass' && conn.auth !== 'key' && conn.auth !== 'agent' && !!conn.passEnc);
+    if (eng === 'docker') return {
+      ok: false, hint: 'sock-access', canFix, fix: 'docker-group',
+      error: `Сокет Docker на хосте есть (${denied.docker}), но у пользователя «${user}» нет к нему доступа.` +
+        (canFix ? ' Могу починить сам: добавлю пользователя в группу docker через sudo и сразу переподключусь.' : ' Добавьте его в группу docker (команда ниже) и повторите.'),
+      cmd: `sudo sh -c '${C_FIX_SCRIPTS['docker-group']}'`,
+    };
+    return {
+      ok: false, hint: 'sock-access', canFix, fix: 'podman-socket-group',
+      error: `Сокет Podman на хосте есть (${denied.podman}), но у пользователя «${user}» нет к нему доступа — это рутовый podman.sock, по умолчанию он только для root.` +
+        (canFix ? ' Могу починить сам: выдам группе пользователя право на этот сокет (drop-in systemd + перезапуск podman.socket; контейнеры не затрагиваются) и сразу переподключусь.' : ' Выдайте доступ командой ниже и повторите.'),
+      cmd: `sudo sh -c '${C_FIX_SCRIPTS['podman-socket-group']}'`,
+    };
+  };
   const socks = scan.sockets || {};
   let sockPath = null;
   if (engine === 'docker' || engine === 'podman') { // явный выбор (из модалки или запомненный) — строго его сокет
     sockPath = socks[engine] || null;
+    if (!sockPath && denied[engine]) return await deniedErr(engine);
     if (!sockPath) return (engine === 'podman' && scan.podmanCli) ? podmanHint : { ok: false, error: `На хосте нет сокета ${engine}` };
   } else if (socks.docker && socks.podman) {
     return { ok: true, needChoice: true }; // оба движка — пусть выберет пользователь (ok:true — не ошибка, без WARN в логе)
   } else {
     sockPath = socks.docker || socks.podman || null;
+    if (!sockPath && (denied.docker || denied.podman)) return await deniedErr(denied.docker ? 'docker' : 'podman');
     if (!sockPath) return scan.podmanCli ? podmanHint : { ok: false, error: 'На хосте нет docker/podman-сокета (docker.sock / podman.sock не найдены)' };
   }
   const isPodman = sockPath.includes('podman');
@@ -4876,13 +4903,50 @@ ipcMain.handle('containers:remoteSet', async (_e, { rhId, engine } = {}) => {
   if (!cli) return { ok: false, error: isPodman ? 'Нужен локальный docker или podman CLI' : 'Удалённый демон — Docker: нужен локальный docker CLI' };
   const t = await rhApi.sockTunnel(rhId, sockPath, 'containers: ' + (conn.name || conn.host));
   if (!t.ok) return { ok: false, error: 'Туннель до сокета не поднялся: ' + (t.error || '') };
+  // Проба демона СКВОЗЬ туннель до фиксации контекста: локальный listener поднимается всегда,
+  // а канал к сокету sshd открывает только в момент коннекта — все прочие проблемы (форвардинг
+  // запрещён, SELinux, мёртвый демон) всплывают именно здесь, и лучше внятной ошибкой, чем EOF-ами в списке.
+  const env = { ...process.env };
+  if (cli === 'docker') env.DOCKER_HOST = 'tcp://127.0.0.1:' + t.port; else env.CONTAINER_HOST = 'tcp://127.0.0.1:' + t.port;
+  const check = await containerRun(cli, ['version'], { timeout: 12000, env });
+  if (!check.ok) {
+    const chanErr = rhApi.tunnelError(t.tunId); // причину смотрим ДО закрытия (closeTunnel убирает запись)
+    try { rhApi.closeTunnel(t.tunId); } catch (_) {}
+    let msg = `Демон на хосте не ответил через туннель (${sockPath}): ` + cFirstLine(check.error);
+    if (chanErr) msg += ` · SSH-канал: ${chanErr}`;
+    if (chanErr && /administratively|prohibited/i.test(chanErr)) msg += '. Похоже, sshd на хосте запрещает проброс unix-сокетов (AllowStreamLocalForwarding/DisableForwarding в sshd_config).';
+    else if (sockPath.includes('docker')) msg += `. Чаще всего это права на сокет: пользователь «${user}» не в группе docker.`;
+    return { ok: false, hint: 'sock-probe', error: msg, cmd: sockPath.includes('docker') ? `sudo usermod -aG docker ${user}` : undefined };
+  }
   if (containersRemote) { try { rhApi.closeTunnel(containersRemote.tunId); } catch (_) {} }
-  containersRemote = { rhId, name: conn.name || conn.host, tunId: t.tunId, port: t.port, cli };
+  containersRemote = { rhId, name: conn.name || conn.host, tunId: t.tunId, port: t.port, cli, sockPath };
   return { ok: true, rhId, name: containersRemote.name, engine: cli };
 });
 ipcMain.handle('containers:remoteStatus', () => (containersRemote
   ? { rhId: containersRemote.rhId, name: containersRemote.name, engine: containersRemote.cli }
   : { rhId: null }));
+// «Починить по SSH»: выдать SSH-пользователю доступ к сокету движка под sudo. Белый список скриптов —
+// рендерер выбирает только идентификатор, произвольная root-команда отсюда не выполняется.
+// Скрипты идут в sh -c '<...>' под sudo (rhApi.sudoExec: сперва -n, затем -S с паролем профиля),
+// $SUDO_USER внутри — тот самый SSH-пользователь. Одинарных кавычек в теле быть не должно.
+// docker-group: классика — членство в группе docker; наши SSH-соединения одноразовые, поэтому
+//   новая группа подхватывается сразу же (relogin не нужен).
+// podman-socket-group: рутовый podman.sock 0600 root:root → drop-in systemd даёт группе пользователя
+//   rw (SocketMode=0660 + SocketGroup); рестарт только socket-юнита (+ стоп idle API-сервиса,
+//   иначе systemd не даст пересоздать сокет) — контейнеры живут под conmon и не затрагиваются.
+const C_FIX_SCRIPTS = {
+  'docker-group': 'usermod -aG docker "$SUDO_USER"',
+  'podman-socket-group': 'g=$(id -gn "$SUDO_USER"); mkdir -p /etc/systemd/system/podman.socket.d && printf "[Socket]\\nSocketMode=0660\\nSocketGroup=%s\\n" "$g" > /etc/systemd/system/podman.socket.d/50-liteeditor.conf && systemctl daemon-reload && { systemctl stop podman.service 2>/dev/null || true; } && systemctl restart podman.socket',
+};
+ipcMain.handle('containers:remoteFix', async (_e, { rhId, fix } = {}) => {
+  const conn = rhApi.findConn(rhId);
+  if (!conn) return { ok: false, error: 'SSH-профиль не найден' };
+  const script = C_FIX_SCRIPTS[fix];
+  if (!script) return { ok: false, error: 'Неизвестный тип починки' };
+  const r = await rhApi.sudoExec(rhId, script, 45000);
+  if (!r.ok) return { ok: false, error: 'Починка не прошла: ' + (r.error || '') + `. Выполните на хосте вручную: sudo sh -c '${script}'` };
+  return { ok: true };
+});
 const cFirstLine = (s) => String(s || '').split('\n')[0].trim();
 function cHumanSize(bytes) { // podman reports image size in bytes; docker is already human
   const n = Number(bytes); if (!Number.isFinite(n) || n <= 0) return '';
@@ -4987,6 +5051,13 @@ async function cListDf(engine) { // disk usage per object type (`system df`)
 }
 ipcMain.handle('containers:list', async (_e, { engine, light } = {}) => {
   if (engine !== 'docker' && engine !== 'podman') return { error: 'bad engine' };
+  // Удалённый контекст: SSH мог мигнуть и унести туннель (ssh.on('close') прибирает запись) —
+  // самовосстановление на ближайшем полле, чтобы не заставлять пользователя перевыбирать хост.
+  if (containersRemote && !rhApi.tunnelAlive(containersRemote.tunId)) {
+    const t = await rhApi.sockTunnel(containersRemote.rhId, containersRemote.sockPath, 'containers: ' + containersRemote.name);
+    if (t.ok) { containersRemote.tunId = t.tunId; containersRemote.port = t.port; }
+    else return { containers: { error: `SSH-туннель к «${containersRemote.name}» оборвался и не восстановился: ` + (t.error || '') } };
+  }
   // Light path = the live poll: only the fast, frequently-changing data (containers + pods). Skips the heavy
   // `system df` (storage scan, ~1s) and images/volumes so a 3s poll doesn't churn the disk. The renderer
   // reconciles only the sections present in the reply, leaving the rest as last rendered by a full fetch.
@@ -5077,6 +5148,21 @@ ipcMain.handle('containers:inspectDb', async (_e, { engine, id } = {}) => {
   if (!info) return { ok: false, error: 'inspect вернул пустой ответ' };
   const res = dbPrefillFromInspect(info, engine);
   if (!res) return { ok: false, error: 'В контейнере не распознана поддерживаемая БД (PostgreSQL / MySQL / MariaDB)' };
+  // Удалённый контекст: 127.0.0.1:<port> префилла — это loopback УДАЛЁННОГО хоста, отсюда так не достучаться.
+  // Обогащаем заготовку SSH-туннелем модуля БД из rh-профиля; шифроблобы секретов совместимы (одна схема
+  // safeStorage v1:), поэтому пароль/ключ переезжают зашифрованными, без плейнтекста через рендерер.
+  if (containersRemote) {
+    const conn = rhApi.findConn(containersRemote.rhId);
+    if (conn) {
+      const p = res.prefill;
+      p.name += ' @ ' + (conn.name || conn.host);
+      p.source = 'rh:' + containersRemote.rhId + ':' + p.source; // дедуп не пересекается с тем же контейнером локально
+      p.sshEnabled = true; p.sshHost = conn.host; p.sshPort = +conn.port || 22; p.sshUser = conn.user || '';
+      if (conn.auth === 'key') { p.sshKeyEnc = conn.keyEnc || ''; p.sshPassEnc = conn.passphraseEnc || ''; }
+      else if (conn.auth !== 'agent') p.sshPassEnc = conn.passEnc || '';
+      // auth 'agent': секретов нет — lib/db.js openTunnel сам падает назад на ssh-agent/дефолтные ключи
+    }
+  }
   return { ok: true, ...res };
 });
 // «Открыть в модуле RabbitMQ»: inspect контейнера → заготовка профиля (management-порт/лог/пас/vhost).

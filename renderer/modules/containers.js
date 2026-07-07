@@ -94,10 +94,13 @@ export function initContainers(host) {
     if (r && r.ok && r.needChoice) { pickEngineModal(rhId, label); return; } // оба сокета — пусть выберет пользователь
     if (!r || !r.ok) {
       if (r && r.hint === 'podman-socket') { offerEnablePodman(rhId, label, r.error); return; }
-      if (saved && !engine) { // запомненный движок протух (сокета больше нет) — сброс и авторетрай с автовыбором
+      if (saved && !engine && !(r && r.hint)) { // запомненный движок протух (сокета больше нет) — сброс и авторетрай с автовыбором
         delete dockerUi.engineByHost[rhId]; persist('dockerUi', dockerUi);
         return applyContainersHost(rhId, label);
       }
+      // sock-access / sock-probe: развёрнутая диагностика (права на сокет, запрет форвардинга) —
+      // в модалке с выделяемым текстом, копируемой командой и кнопкой «Починить по SSH» (если sudo доступен)
+      if (r && r.hint) { showHostDiag(rhId, label, r); return; }
       toast((r && r.error) || 'Не удалось переключить хост', { kind: 'err', ttl: 9000 }); return;
     }
     dockerRemote = r.rhId ? { rhId: r.rhId, name: r.name, engine: r.engine } : null;
@@ -122,6 +125,44 @@ export function initContainers(host) {
       list.appendChild(b);
     }
     m.appendChild(list);
+  }
+  // Диагностика неудачного переключения хоста (нет прав на сокет / sshd запрещает форвардинг):
+  // модалка с выделяемым текстом и копируемой командой лечения — в тосте такое не прочитать и не скопировать.
+  // r.canFix (на хосте доступен sudo) → кнопка «Починить по SSH и подключиться»: main выполняет фикс из
+  // белого списка (containers:remoteFix) и мы сразу переподключаемся — ни одной ручной команды.
+  function showHostDiag(rhId, label, r) {
+    const { m, close } = makeModal('<h2>Контейнеры хоста недоступны</h2>');
+    m.classList.add('sel-text');
+    m.appendChild(el('div', 'about-desc', `«${label}»: ${(r && r.error) || 'не удалось подключиться'}`));
+    if (r && r.cmd) {
+      const row = el('div', 'docker-diag-cmd');
+      row.appendChild(el('code', null, r.cmd));
+      const cp = iconBtn('drow-act', 'copy', 'Копировать команду', 14);
+      cp.onclick = () => { lite.copyText(r.cmd); toast('Команда скопирована'); };
+      row.appendChild(cp);
+      m.appendChild(row);
+    }
+    if (r && r.fix && r.canFix) {
+      const row = el('div', 'gm-actions'); row.style.marginTop = '12px';
+      const b = el('button', 'btn primary', 'Починить по SSH и подключиться');
+      b.onclick = async () => {
+        b.disabled = true; b.textContent = 'Чиню через sudo…';
+        let x;
+        try { x = await lite.containers.remoteFix(rhId, r.fix); } catch (e) { x = { ok: false, error: String(e) }; }
+        if (!x || !x.ok) {
+          b.disabled = false; b.textContent = 'Починить по SSH и подключиться';
+          toast((x && x.error) || 'Починка не прошла', { kind: 'err', ttl: 12000 });
+          return;
+        }
+        close();
+        toast('Доступ выдан — переподключаюсь…', { ttl: 4000 });
+        applyContainersHost(rhId, label);
+      };
+      row.appendChild(b);
+      m.appendChild(row);
+    } else if (r && r.fix) {
+      m.appendChild(el('div', 'about-desc', 'Авто-починка недоступна: на хосте нет sudo без пароля (а пароль профиля не подходит или не задан). Выполните команду выше вручную и повторите подключение.'));
+    }
   }
   // Podman установлен, но его API-сокет (socket-activated) спит — предложить включить прямо по SSH.
   function offerEnablePodman(rhId, label, msg) {
@@ -415,14 +456,18 @@ export function initContainers(host) {
     main.appendChild(el('span', 'drow-sub', [c.image, c.ports].filter(Boolean).join('   ·   ')));
     row.appendChild(main);
     const acts = el('div', 'drow-acts'); fillContainerActs(acts, c); row.appendChild(acts);
-    row.addEventListener('click', () => openDockerDetail(row._c)); // row._c kept fresh by updateContainerRow
+    // текст строки выделяемый (user-select) → mouseup в конце выделения тоже даёт click; не открывать деталь
+    row.addEventListener('click', () => { if (String(window.getSelection() || '')) return; openDockerDetail(row._c); }); // row._c kept fresh by updateContainerRow
     return row;
   }
+  // Пишем textContent только при реальном изменении: перезапись текстового узла (даже тем же текстом)
+  // сбрасывает выделение пользователя, а полл проходит каждые 3 секунды.
+  function setText(node, text) { if (node.textContent !== text) node.textContent = text; }
   function updateContainerRow(row, c) { // in-place: dot/name/sub always; action buttons only when their signature changes
     row._c = c;
     const dot = row.querySelector('.dstate'); dot.className = 'dstate dstate-' + dStateClass(c.state); dot.title = c.status || c.state || '';
-    row.querySelector('.drow-name').textContent = c.service || c.name || String(c.id).slice(0, 12);
-    row.querySelector('.drow-sub').textContent = [c.image, c.ports].filter(Boolean).join('   ·   ');
+    setText(row.querySelector('.drow-name'), c.service || c.name || String(c.id).slice(0, 12));
+    setText(row.querySelector('.drow-sub'), [c.image, c.ports].filter(Boolean).join('   ·   '));
     const sig = actsSig(c);
     if (row.dataset.sig !== sig) { row.dataset.sig = sig; const acts = row.querySelector('.drow-acts'); acts.innerHTML = ''; fillContainerActs(acts, c); }
   }
@@ -515,6 +560,7 @@ export function initContainers(host) {
     if (dockerGroupCollapsed(engine, name)) body.style.display = 'none';
     for (const c of list) { const row = dockerContainerRow(c); row.dataset.k = c.id; body.appendChild(row); }
     head.onclick = () => {
+      if (String(window.getSelection() || '')) return; // конец выделения имени группы — не сворачивать
       toggleDockerGroup(engine, name);
       const col = dockerGroupCollapsed(engine, name);
       body.style.display = col ? 'none' : '';
@@ -527,7 +573,7 @@ export function initContainers(host) {
   // Live refresh of an existing group block: count + rows in place (head/bulk read block._containers).
   function updateGroupBlock(block, list) {
     block._containers = list;
-    block.querySelector('.dgrp-count').textContent = String(list.length);
+    setText(block.querySelector('.dgrp-count'), String(list.length));
     reconcileRows(block.querySelector('.docker-group-body'), list, dockerContainerRow, updateContainerRow, (c) => c.id);
   }
   function renderDockerDisk(df) {
@@ -596,7 +642,7 @@ export function initContainers(host) {
       return;
     }
     const items = (payload && payload.items) || [];
-    sec.querySelector('.dsec-count').textContent = String(items.length);
+    setText(sec.querySelector('.dsec-count'), String(items.length));
     if (!items.length) return setSectionPlaceholder(body, 'docker-empty', 'Нет контейнеров.');
     clearSectionPlaceholder(body);
     const groups = {};
@@ -629,7 +675,7 @@ export function initContainers(host) {
       return;
     }
     const items = (payload && payload.items) || [];
-    sec.querySelector('.dsec-count').textContent = String(items.length);
+    setText(sec.querySelector('.dsec-count'), String(items.length));
     if (!items.length) return setSectionPlaceholder(body, 'docker-empty', emptyText);
     clearSectionPlaceholder(body);
     reconcileRows(body, items, rowFn, null, keyFn); // key embeds mutable fields → change swaps the row
